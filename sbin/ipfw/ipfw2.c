@@ -1528,6 +1528,17 @@ print_instruction(struct buf_pr *bp, const struct format_opts *fo,
 		bprintf(bp, ")");
 		}
 		break;
+	case O_MACADDR2_LOOKUP: {
+		char *t;
+		uint32_t *a = ((ipfw_insn_u32 *)cmd)->d;
+
+		t = table_search_ctlv(fo->tstate, cmd->arg1);
+		bprintf(bp, " MAC table(%s", t);
+		if (cmd->len == F_INSN_SIZE(ipfw_insn_u32))
+			bprintf(bp, ",%u", *a);
+		bprintf(bp, ")");
+		}
+		break;
 	case O_MACADDR2:
 		print_mac(bp, insntod(cmd, mac));
 		break;

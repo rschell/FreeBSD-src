@@ -297,6 +297,8 @@ enum ipfw_opcodes {		/* arguments (4 byte each)	*/
 
 	O_MACADDR2_LOOKUP,	/* arg1=table number, u32=value	*/
 
+	O_MACADDR2_LOOKUP,	/* arg1=table number, u32=value	*/
+
 	O_LAST_OPCODE		/* not an opcode!		*/
 };
 
