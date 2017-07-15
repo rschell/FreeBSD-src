@@ -267,6 +267,7 @@ enum tokens {
 	TOK_OLIST,
 	TOK_MISSING,
 	TOK_ORFLUSH,
+	TOK_ZEROCNT,
 
 	/* NAT64 tokens */
 	TOK_NAT64STL,
