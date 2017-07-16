@@ -1855,6 +1855,7 @@ do {								\
 				if (match && te != NULL) {
 					tkeylen = 0;
 					tidx = ((ipfw_insn_if *)cmd)->p.kidx;
+				}
 				break;
 
 			case O_VIA:
@@ -1864,6 +1865,7 @@ do {								\
 				if (match && te != NULL) {
 					tkeylen = 0;
 					tidx = ((ipfw_insn_if *)cmd)->p.kidx;
+				}
 				break;
 
 			case O_MACADDR2_LOOKUP:
