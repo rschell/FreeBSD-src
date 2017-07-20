@@ -904,6 +904,10 @@ typedef struct	_ipfw_obj_tentry {
 	uint8_t		spare0;
 	uint16_t	idx;		/* Table name index		*/
 	uint16_t	spare1;
+	uint64_t	bcnt;		/* Byte counter */
+	uint64_t	mac;		/* MAC address for mixed enties */
+	uint64_t	pcnt;		/* Packet counter */
+	time_t		timestamp;	/* Timestamp of last match */
 	union {
 		/* Longest field needs to be aligned by 8-byte boundary	*/
 		struct in_addr		addr;	/* IPv4 address		*/
