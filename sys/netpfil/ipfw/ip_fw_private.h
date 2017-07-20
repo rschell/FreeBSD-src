@@ -784,10 +784,10 @@ int ipfw_reset_eaction_instance(struct ip_fw_chain *ch, uint16_t eaction_id,
 struct table_info;
 
 typedef int (table_lookup_t)(struct table_info *ti, void *key, uint32_t keylen,
-    uint32_t *val, void **te);
+    uint32_t *val, uint8_t *ea, void **te);
 
 int ipfw_lookup_table(struct ip_fw_chain *ch, uint16_t tbl, uint16_t plen,
-    void *paddr, uint32_t *val);
+    void *paddr, uint32_t *val, uint8_t *ea, void **te);
 void ipfw_cnt_update_tentry(struct ip_fw_chain *ch, uint16_t tbl, uint16_t plen,
     void *e, int pktlen);
 struct named_object *ipfw_objhash_lookup_table_kidx(struct ip_fw_chain *ch,
