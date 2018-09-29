@@ -46,6 +46,20 @@ start_cmd="growfs_start"
 stop_cmd=":"
 rcvar="growfs_enable"
 
+growfs_get_diskdev ()
+{
+	sysctl -b kern.geom.conftxt |
+	while read line
+	do
+		local _type=$(echo ${line} | awk '{printf $2}')
+		local _dev=$(echo ${line} | awk '{printf $3}')
+		if [ "${_type}" = "DISK" -a -n "$(echo ${1} | grep ${_dev})" ]; then
+			echo -n ${_dev}
+			break
+		fi
+	done
+}
+
 growfs_start ()
 {
 	echo "Growing root partition to fill device"
@@ -80,6 +94,11 @@ growfs_start ()
 		search=$rawdev
 	fi
 
+	diskdev=$(growfs_get_diskdev ${search})
+	if [ -z "${diskdev" ]; then
+		diskdev=${rootdev}
+	fi
+
 	sysctl -b kern.geom.conftxt | awk '
 {
 	lvl=$1
@@ -109,15 +128,8 @@ growfs_start ()
 		exit 0
 	}
 }' dev="$search"
-	gpart commit "$rootdev"
-	case "$FSTYPE" in
-	ufs)
-		growfs -y /dev/"$rootdev"
-		;;
-	zfs)
-		zpool online -e $pool $rootdev
-		;;
-	esac
+	gpart commit "$diskdev"
+	growfs -y /dev/"$rootdev"
 }
 
 load_rc_config $name
