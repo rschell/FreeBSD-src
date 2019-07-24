@@ -2154,7 +2154,7 @@ unp_internalize(struct mbuf **controlp, struct thread *td)
 	struct timespec *ts;
 	void *data;
 	socklen_t clen, datalen;
-	int i, j, error, *fdp, oldfds;
+	int i, error, *fdp, oldfds;
 	u_int newlen;
 
 	UNP_LINK_UNLOCK_ASSERT();
