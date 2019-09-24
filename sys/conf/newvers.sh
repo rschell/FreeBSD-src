@@ -45,7 +45,7 @@
 #                      included if the tree is modified.
 
 TYPE="FreeBSD"
-REVISION="12.0"
+REVISION="12.1"
 BRANCH="STABLE"
 if [ -n "${BRANCH_OVERRIDE}" ]; then
 	BRANCH=${BRANCH_OVERRIDE}
