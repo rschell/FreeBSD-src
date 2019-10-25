@@ -29,8 +29,13 @@
 --
 
 local core = require("core")
+local hook = require("hook")
 
 local color = {}
+
+local function recalcDisabled()
+	color.disabled = not color.isEnabled()
+end
 
 -- Module exports
 color.BLACK   = 0
@@ -42,7 +47,7 @@ color.MAGENTA = 5
 color.CYAN    = 6
 color.WHITE   = 7
 
-color.DEFAULT = 0
+color.DEFAULT = 9
 color.BRIGHT  = 1
 color.DIM     = 2
 
@@ -54,11 +59,9 @@ function color.isEnabled()
 	return not core.isSerialBoot()
 end
 
-color.disabled = not color.isEnabled()
-
 function color.escapefg(color_value)
 	if color.disabled then
-		return color_value
+		return ''
 	end
 	return core.KEYSTR_CSI .. "3" .. color_value .. "m"
 end
@@ -67,12 +70,12 @@ function color.resetfg()
 	if color.disabled then
 		return ''
 	end
-	return color.escapefg(color.WHITE)
+	return color.escapefg(color.DEFAULT)
 end
 
 function color.escapebg(color_value)
 	if color.disabled then
-		return color_value
+		return ''
 	end
 	return core.KEYSTR_CSI .. "4" .. color_value .. "m"
 end
@@ -81,7 +84,7 @@ function color.resetbg()
 	if color.disabled then
 		return ''
 	end
-	return color.escapebg(color.BLACK)
+	return color.escapebg(color.DEFAULT)
 end
 
 function color.escape(fg_color, bg_color, attribute)
@@ -101,7 +104,7 @@ function color.default()
 	if color.disabled then
 		return ""
 	end
-	return color.escape(color.WHITE, color.BLACK, color.DEFAULT)
+	return color.escape(color.DEFAULT, color.DEFAULT)
 end
 
 function color.highlight(str)
@@ -112,5 +115,8 @@ function color.highlight(str)
 	-- case the terminal defaults don't match what we're expecting.
 	return core.KEYSTR_CSI .. "1m" .. str .. core.KEYSTR_CSI .. "22m"
 end
+
+recalcDisabled()
+hook.register("config.loaded", recalcDisabled)
 
 return color

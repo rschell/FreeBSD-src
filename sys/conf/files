@@ -4152,8 +4152,7 @@ net/if_mib.c			standard
 net/if_spppfr.c			optional sppp | netgraph_sppp
 net/if_spppsubr.c		optional sppp | netgraph_sppp
 net/if_stf.c			optional stf inet inet6
-net/if_tun.c			optional tun
-net/if_tap.c			optional tap
+net/if_tuntap.c			optional tuntap
 net/if_vlan.c			optional vlan
 net/if_vxlan.c			optional vxlan inet | vxlan inet6
 net/ifdi_if.m			optional ether pci iflib
@@ -4343,6 +4342,7 @@ netinet/sctp_cc_functions.c	optional inet sctp | inet6 sctp
 netinet/sctp_crc32.c		optional inet | inet6
 netinet/sctp_indata.c		optional inet sctp | inet6 sctp
 netinet/sctp_input.c		optional inet sctp | inet6 sctp
+netinet/sctp_kdtrace.c		optional inet sctp | inet6 sctp
 netinet/sctp_output.c		optional inet sctp | inet6 sctp
 netinet/sctp_pcb.c		optional inet sctp | inet6 sctp
 netinet/sctp_peeloff.c		optional inet sctp | inet6 sctp
