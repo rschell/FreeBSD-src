@@ -100,7 +100,6 @@ bignum_to_le(const BIGNUM *n)
 
              error = BN_bn2lebinpad(n, rd, blen);
              if (error < 0) {
-                     ERR_print_error_fp(stderr);
                      free(rd);
                      return(NULL);
 	}
