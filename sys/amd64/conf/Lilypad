@@ -20,6 +20,7 @@ options		TMPFS
 options		UNIONFS
 options		NULLFS
 options		PPS_SYNC
+options		XZ
 
 # Wireless
 nooptions	IEEE80211_DEBUG	# enable debug msgs
