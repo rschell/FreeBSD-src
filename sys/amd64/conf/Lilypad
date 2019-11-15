@@ -20,7 +20,6 @@ options		TMPFS
 options		UNIONFS
 options		NULLFS
 options		PPS_SYNC
-options		XZ
 
 # Wireless
 nooptions	IEEE80211_DEBUG	# enable debug msgs
@@ -157,6 +156,7 @@ options		MSGTQL=2048	# max messages in system
 device		pf
 device		pflog
 device		pfsync
+device		xz
 
 device		rndtest		# FIPS 140-2 entropy tester
 device		hifn		# Hifn 7951, 7781, etc.
