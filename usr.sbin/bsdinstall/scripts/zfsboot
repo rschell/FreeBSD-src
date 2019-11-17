@@ -148,25 +148,8 @@ f_isset ZFSBOOT_DATASETS || ZFSBOOT_DATASETS="
 	# Compress /tmp, allow exec but not setuid
 	/tmp		mountpoint=/tmp,exec=on,setuid=off
 
-	# Don't mount /usr so that 'base' files go to the BEROOT
-	/usr		mountpoint=/usr,canmount=off
-
-	# Home directories separated so they are common to all BEs
-	/usr/home	# NB: /home is a symlink to /usr/home
-
-	# Ports tree
-	/usr/ports	setuid=off
-
-	# Source tree (compressed)
-	/usr/src
-
 	# Create /var and friends
-	/var		mountpoint=/var,canmount=off
-	/var/audit	exec=off,setuid=off
-	/var/crash	exec=off,setuid=off
-	/var/log	exec=off,setuid=off
-	/var/mail	atime=on
-	/var/tmp	setuid=off
+	/var		mountpoint=/var
 " # END-QUOTE
 
 #
@@ -253,7 +236,7 @@ msg_encrypt_disks_help="Use geli(8) to encrypt all data partitions"
 msg_error="Error"
 msg_force_4k_sectors="Force 4K Sectors?"
 msg_force_4k_sectors_help="Align partitions to 4K sector boundries and set vfs.zfs.min_auto_ashift=12"
-msg_freebsd_installer="FreeBSD Installer"
+msg_freebsd_installer="pfSense Installer"
 msg_geli_password="Enter a strong passphrase, used to protect your encryption keys. You will be required to enter this passphrase each time the system is booted"
 msg_geli_setup="Initializing encryption on selected disks,\n this will take several seconds per disk"
 msg_install="Install"
@@ -1646,7 +1629,7 @@ while :; do
 		# Make sure each disk will have room for ZFS
 		if f_expand_number "$ZFSBOOT_SWAP_SIZE" swapsize &&
 		   f_expand_number "$ZFSBOOT_BOOT_POOL_SIZE" bootsize &&
-		   f_expand_number "1g" zpoolmin
+		   f_expand_number "4g" zpoolmin
 		then
 			minsize=$(( $swapsize + $zpoolmin )) teeny_disks=
 			[ "$ZFSBOOT_BOOT_POOL" ] &&

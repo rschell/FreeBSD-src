@@ -92,6 +92,8 @@ __FBSDID("$FreeBSD$");
 #include <netinet/udp_var.h>
 
 #include <netpfil/ipfw/ip_fw_private.h> /* XXX: only for DIR_IN/DIR_OUT */
+#include <netinet/ip_fw.h>
+#include <netinet/ip_dummynet.h>
 
 #ifdef INET6
 #include <netinet/ip6.h>
@@ -239,6 +241,8 @@ static int		 pf_state_key_attach(struct pf_state_key *,
 static void		 pf_state_key_detach(struct pf_state *, int);
 static int		 pf_state_key_ctor(void *, int, void *, int);
 static u_int32_t	 pf_tcp_iss(struct pf_pdesc *);
+void			 pf_rule_to_actions(struct pf_rule *,
+			    struct pf_rule_actions *);
 static int		 pf_test_rule(struct pf_rule **, struct pf_state **,
 			    int, struct pfi_kif *, struct mbuf *, int,
 			    struct pf_pdesc *, struct pf_rule **,
@@ -271,7 +275,8 @@ static int		 pf_test_state_icmp(struct pf_state **, int,
 			    struct pfi_kif *, struct mbuf *, int,
 			    void *, struct pf_pdesc *, u_short *);
 static int		 pf_test_state_other(struct pf_state **, int,
-			    struct pfi_kif *, struct mbuf *, struct pf_pdesc *);
+			    struct pfi_kif *, struct mbuf *, int,
+			    struct pf_pdesc *);
 static u_int8_t		 pf_get_wscale(struct mbuf *, int, u_int16_t,
 			    sa_family_t);
 static u_int16_t	 pf_get_mss(struct mbuf *, int, u_int16_t,
@@ -294,6 +299,10 @@ static u_int		 pf_purge_expired_states(u_int, int);
 static void		 pf_purge_unlinked_rules(void);
 static int		 pf_mtag_uminit(void *, int, int);
 static void		 pf_mtag_free(struct m_tag *);
+static void		 pf_packet_redo_nat(struct mbuf *, struct pf_pdesc *,
+			    int, struct pf_state *, int);
+static void		 pf_packet_undo_nat(struct mbuf *, struct pf_pdesc *,
+			    int, struct pf_state *, int);
 #ifdef INET
 static void		 pf_route(struct mbuf **, struct pf_rule *, int,
 			    struct ifnet *, struct pf_state *,
@@ -322,8 +331,12 @@ VNET_DEFINE(struct pf_limit, pf_limits[PF_LIMIT_MAX]);
 		(s) = pf_find_state((i), (k), (d));			\
 		if ((s) == NULL)					\
 			return (PF_DROP);				\
-		if (PACKET_LOOPED(pd))					\
+		if (PACKET_LOOPED(pd)) {				\
+			if ((s)->key[PF_SK_WIRE] != (s)->key[PF_SK_STACK]) {	\
+				pf_packet_redo_nat(m, pd, off, s, direction);	\
+			}						\
 			return (PF_PASS);				\
+		}							\
 		if ((d) == PF_OUT &&					\
 		    (((s)->rule.ptr->rt == PF_ROUTETO &&		\
 		    (s)->rule.ptr->direction == PF_OUT) ||		\
@@ -334,8 +347,7 @@ VNET_DEFINE(struct pf_limit, pf_limits[PF_LIMIT_MAX]);
 			return (PF_PASS);				\
 	} while (0)
 
-#define	BOUND_IFACE(r, k) \
-	((r)->rule_flag & PFRULE_IFBOUND) ? (k) : V_pfi_all
+#define	BOUND_IFACE(r, k) k
 
 #define	STATE_INC_COUNTERS(s)						\
 	do {								\
@@ -422,6 +434,160 @@ pf_addr_cmp(struct pf_addr *a, struct pf_addr *b, sa_family_t af)
 		panic("%s: unknown address family %u", __func__, af);
 	}
 	return (0);
+}
+
+static void
+pf_packet_undo_nat(struct mbuf *m, struct pf_pdesc *pd, int off,
+    struct pf_state *state, int direction)
+{
+	struct pf_state_key *nk;
+
+	if (state == NULL || state->nat_rule.ptr == NULL)
+		return;
+
+	if (state->nat_rule.ptr->action == PF_RDR ||
+	    state->nat_rule.ptr->action == PF_BINAT)
+		nk = (state)->key[PF_SK_WIRE];
+	else
+		nk = (state)->key[PF_SK_STACK];
+
+	switch (pd->proto) {
+	case IPPROTO_TCP: {
+		struct tcphdr *th = pd->hdr.tcp;
+
+		if (direction == PF_OUT) {
+			pf_change_ap(m, pd->src, &th->th_sport, pd->ip_sum,
+			    &th->th_sum, &nk->addr[pd->sidx],
+			    nk->port[pd->sidx], 0, pd->af);
+		} else {
+			pf_change_ap(m, pd->dst, &th->th_dport, pd->ip_sum,
+			    &th->th_sum, &nk->addr[pd->didx],
+			    nk->port[pd->didx], 0, pd->af);
+		}
+		m_copyback(m, off, sizeof(*th), (caddr_t)th);
+	}
+		break;
+	case IPPROTO_UDP: {
+		struct udphdr *uh = pd->hdr.udp;
+
+		if (direction == PF_OUT) {
+			pf_change_ap(m, pd->src, &uh->uh_sport, pd->ip_sum,
+			    &uh->uh_sum, &nk->addr[pd->sidx],
+			    nk->port[pd->sidx], 1, pd->af);
+		} else {
+			pf_change_ap(m, pd->dst, &uh->uh_dport, pd->ip_sum,
+			    &uh->uh_sum, &nk->addr[pd->didx],
+			    nk->port[pd->didx], 1, pd->af);
+		}
+		m_copyback(m, off, sizeof(*uh), (caddr_t)uh);
+	}
+		break;
+	/* case IPPROTO_ICMP: */
+		/* XXX: If we want to do this for icmp is probably wrong!?! */
+		/* break; */
+	default:
+		if (direction == PF_OUT) {
+			switch (pd->af) {
+			case AF_INET:
+				pf_change_a(&pd->src->v4.s_addr,
+				    pd->ip_sum, nk->addr[pd->sidx].v4.s_addr,
+				    0);
+				break;
+			case AF_INET6:
+				PF_ACPY(pd->src, &nk->addr[pd->sidx], pd->af);
+				break;
+			}
+		} else {
+			switch (pd->af) {
+			case AF_INET:
+				pf_change_a(&pd->dst->v4.s_addr,
+				    pd->ip_sum, nk->addr[pd->didx].v4.s_addr,
+				    0);
+				break;
+			case AF_INET6:
+				PF_ACPY(pd->dst, &nk->addr[pd->didx], pd->af);
+				break;
+			}
+		}
+		break;
+	}
+}
+
+static void
+pf_packet_redo_nat(struct mbuf *m, struct pf_pdesc *pd, int off,
+    struct pf_state *state, int direction)
+{
+	struct pf_state_key *nk;
+
+	if (state == NULL || state->nat_rule.ptr == NULL)
+		return;
+
+	if (state->nat_rule.ptr->action == PF_RDR ||
+	    state->nat_rule.ptr->action == PF_BINAT)
+		nk = (state)->key[PF_SK_STACK];
+	else
+		nk = (state)->key[PF_SK_WIRE];
+
+	switch (pd->proto) {
+	case IPPROTO_TCP: {
+		struct tcphdr *th = pd->hdr.tcp;
+
+		if (direction == PF_OUT) {
+			pf_change_ap(m, pd->src, &th->th_sport, pd->ip_sum,
+			    &th->th_sum, &nk->addr[pd->sidx],
+			    nk->port[pd->sidx], 0, pd->af);
+		} else {
+			pf_change_ap(m, pd->dst, &th->th_dport, pd->ip_sum,
+			    &th->th_sum, &nk->addr[pd->didx],
+			    nk->port[pd->didx], 0, pd->af);
+		}
+		m_copyback(m, off, sizeof(*th), (caddr_t)th);
+	}
+		break;
+	case IPPROTO_UDP: {
+		struct udphdr *uh = pd->hdr.udp;
+
+		if (direction == PF_OUT) {
+			pf_change_ap(m, pd->src, &uh->uh_sport, pd->ip_sum,
+			    &uh->uh_sum, &nk->addr[pd->sidx],
+			    nk->port[pd->sidx], 1, pd->af);
+		} else {
+			pf_change_ap(m, pd->dst, &uh->uh_dport, pd->ip_sum,
+			    &uh->uh_sum, &nk->addr[pd->didx],
+			    nk->port[pd->didx], 1, pd->af);
+		}
+		m_copyback(m, off, sizeof(*uh), (caddr_t)uh);
+	}
+		break;
+	/* case IPPROTO_ICMP: */
+		/* XXX: If we want to do this for icmp is probably wrong!?! */
+		/* break; */
+	default:
+		if (direction == PF_OUT) {
+			switch (pd->af) {
+			case AF_INET:
+				pf_change_a(&pd->src->v4.s_addr,
+				    pd->ip_sum, nk->addr[pd->sidx].v4.s_addr,
+				    0);
+				break;
+			case AF_INET6:
+				PF_ACPY(pd->src, &nk->addr[pd->sidx], pd->af);
+				break;
+			}
+		} else {
+			switch (pd->af) {
+			case AF_INET:
+				pf_change_a(&pd->dst->v4.s_addr,
+				    pd->ip_sum, nk->addr[pd->didx].v4.s_addr,
+				    0);
+				break;
+			case AF_INET6:
+				PF_ACPY(pd->dst, &nk->addr[pd->didx], pd->af);
+				break;
+			}
+		}
+		break;
+	}
 }
 
 static __inline uint32_t
@@ -1334,7 +1500,7 @@ pf_find_state(struct pfi_kif *kif, struct pf_state_key_cmp *key, u_int dir)
 
 	/* List is sorted, if-bound states before floating ones. */
 	TAILQ_FOREACH(s, &sk->states[idx], key_list[idx])
-		if (s->kif == V_pfi_all || s->kif == kif) {
+		{
 			PF_STATE_LOCK(s);
 			PF_HASHROW_UNLOCK(kh);
 			if (s->timeout >= PFTM_MAX) {
@@ -2798,6 +2964,7 @@ pf_match_port(u_int8_t op, u_int16_t a1, u_int16_t a2, u_int16_t p)
 	return (pf_match(op, a1, a2, p));
 }
 
+#ifdef PF_USER_INFO
 static int
 pf_match_uid(u_int8_t op, uid_t a1, uid_t a2, uid_t u)
 {
@@ -2813,6 +2980,7 @@ pf_match_gid(u_int8_t op, gid_t a1, gid_t a2, gid_t g)
 		return (0);
 	return (pf_match(op, a1, a2, g));
 }
+#endif
 
 int
 pf_match_tag(struct mbuf *m, struct pf_rule *r, int *tag, int mtag)
@@ -3006,6 +3174,22 @@ pf_addr_inc(struct pf_addr *addr, sa_family_t af)
 }
 #endif /* INET6 */
 
+void
+pf_rule_to_actions(struct pf_rule *r, struct pf_rule_actions *a)
+{
+	if (r->qid)
+		a->qid = r->qid;
+	if (r->pqid)
+		a->pqid = r->pqid;
+	if (r->pdnpipe)
+		a->pdnpipe = r->pdnpipe;
+	if (r->dnpipe)
+		a->dnpipe = r->dnpipe;
+	if (r->free_flags & PFRULE_DN_IS_PIPE)
+		a->flags |= PFRULE_DN_IS_PIPE;
+}
+
+#ifdef PF_USER_INFO
 int
 pf_socket_lookup(int direction, struct pf_pdesc *pd, struct mbuf *m)
 {
@@ -3085,6 +3269,7 @@ pf_socket_lookup(int direction, struct pf_pdesc *pd, struct mbuf *m)
 
 	return (1);
 }
+#endif
 
 static u_int8_t
 pf_get_wscale(struct mbuf *m, int off, u_int16_t th_off, sa_family_t af)
@@ -3262,12 +3447,14 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 
 	PF_RULES_RASSERT();
 
+#ifdef PF_USER_INFO
 	if (inp != NULL) {
 		INP_LOCK_ASSERT(inp);
 		pd->lookup.uid = inp->inp_cred->cr_uid;
 		pd->lookup.gid = inp->inp_cred->cr_groups[0];
 		pd->lookup.done = 1;
 	}
+#endif
 
 	switch (pd->proto) {
 	case IPPROTO_TCP:
@@ -3478,7 +3665,11 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 		/* icmp only. type always 0 in other cases */
 		else if (r->code && r->code != icmpcode + 1)
 			r = TAILQ_NEXT(r, entries);
-		else if (r->tos && !(r->tos == pd->tos))
+		else if ((r->rule_flag & PFRULE_TOS) && r->tos &&
+		    !(r->tos == pd->tos))
+			r = TAILQ_NEXT(r, entries);
+		else if ((r->rule_flag & PFRULE_DSCP) && r->tos &&
+		    !(r->tos == (pd->tos & DSCP_MASK)))
 			r = TAILQ_NEXT(r, entries);
 		else if (r->rule_flag & PFRULE_FRAGMENT)
 			r = TAILQ_NEXT(r, entries);
@@ -3486,6 +3677,7 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 		    (r->flagset & th->th_flags) != r->flags)
 			r = TAILQ_NEXT(r, entries);
 		/* tcp/udp only. uid.op always 0 in other cases */
+#ifdef PF_USER_INFO
 		else if (r->uid.op && (pd->lookup.done || (pd->lookup.done =
 		    pf_socket_lookup(direction, pd, m), 1)) &&
 		    !pf_match_uid(r->uid.op, r->uid.uid[0], r->uid.uid[1],
@@ -3497,6 +3689,7 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 		    !pf_match_gid(r->gid.op, r->gid.gid[0], r->gid.gid[1],
 		    pd->lookup.gid))
 			r = TAILQ_NEXT(r, entries);
+#endif
 		else if (r->prio &&
 		    !pf_match_ieee8021q_pcp(r->prio, m))
 			r = TAILQ_NEXT(r, entries);
@@ -3517,10 +3710,20 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 			if (r->rtableid >= 0)
 				rtableid = r->rtableid;
 			if (r->anchor == NULL) {
-				match = 1;
-				*rm = r;
-				*am = a;
-				*rsm = ruleset;
+				if (r->action == PF_MATCH) {
+					r->packets[direction == PF_OUT]++;
+					r->bytes[direction == PF_OUT] += pd->tot_len;
+					pf_rule_to_actions(r, &pd->act);
+					if (r->log)
+						PFLOG_PACKET(kif, m, af,
+						    direction, PFRES_MATCH, r,
+						    a, ruleset, pd, 1);
+				} else {
+					match = 1;
+					*rm = r;
+					*am = a;
+					*rsm = ruleset;
+				}
 				if ((*rm)->quick)
 					break;
 				r = TAILQ_NEXT(r, entries);
@@ -3538,6 +3741,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 	ruleset = *rsm;
 
 	REASON_SET(&reason, PFRES_MATCH);
+
+	/* apply actions for last matching pass/block rule */
+	pf_rule_to_actions(r, &pd->act);
 
 	if (r->log || (nr != NULL && nr->log)) {
 		if (rewrite)
@@ -3657,6 +3863,11 @@ pf_create_state(struct pf_rule *r, struct pf_rule *nr, struct pf_rule *a,
 		s->state_flags |= PFSTATE_SLOPPY;
 	s->log = r->log & PF_LOG_ALL;
 	s->sync_state = PFSYNC_S_NONE;
+	s->qid = pd->act.qid;
+	s->pqid = pd->act.pqid;
+	s->pdnpipe = pd->act.pdnpipe;
+	s->dnpipe = pd->act.dnpipe;
+	s->state_flags |= pd->act.flags;
 	if (nr != NULL)
 		s->log |= nr->log & PF_LOG_ALL;
 	switch (pd->proto) {
@@ -3895,6 +4106,9 @@ pf_test_fragment(struct pf_rule **rm, int direction, struct pfi_kif *kif,
 			r = r->skip[PF_SKIP_DST_ADDR].ptr;
 		else if (r->tos && !(r->tos == pd->tos))
 			r = TAILQ_NEXT(r, entries);
+		else if ((r->rule_flag & PFRULE_DSCP) && r->tos &&
+		    !(r->tos == (pd->tos & DSCP_MASK)))
+			r = TAILQ_NEXT(r, entries);
 		else if (r->os_fingerprint != PF_OSFP_ANY)
 			r = TAILQ_NEXT(r, entries);
 		else if (pd->proto == IPPROTO_UDP &&
@@ -3918,10 +4132,20 @@ pf_test_fragment(struct pf_rule **rm, int direction, struct pfi_kif *kif,
 			r = TAILQ_NEXT(r, entries);
 		else {
 			if (r->anchor == NULL) {
-				match = 1;
-				*rm = r;
-				*am = a;
-				*rsm = ruleset;
+				if (r->action == PF_MATCH) {
+                                        r->packets[direction == PF_OUT]++;
+                                        r->bytes[direction == PF_OUT] += pd->tot_len;
+                                        pf_rule_to_actions(r, &pd->act);
+                                        if (r->log)
+                                                PFLOG_PACKET(kif, m, af,
+                                                    direction, PFRES_MATCH, r,
+                                                    a, ruleset, pd, 1);
+                                } else {
+					match = 1;
+					*rm = r;
+					*am = a;
+					*rsm = ruleset;
+				}
 				if ((*rm)->quick)
 					break;
 				r = TAILQ_NEXT(r, entries);
@@ -3939,6 +4163,9 @@ pf_test_fragment(struct pf_rule **rm, int direction, struct pfi_kif *kif,
 	ruleset = *rsm;
 
 	REASON_SET(&reason, PFRES_MATCH);
+
+	/* apply actions for last matching pass/block rule */
+        pf_rule_to_actions(r, &pd->act);
 
 	if (r->log)
 		PFLOG_PACKET(kif, m, af, direction, reason, r, a, ruleset, pd,
@@ -5197,7 +5424,7 @@ pf_test_state_icmp(struct pf_state **state, int direction, struct pfi_kif *kif,
 
 static int
 pf_test_state_other(struct pf_state **state, int direction, struct pfi_kif *kif,
-    struct mbuf *m, struct pf_pdesc *pd)
+    struct mbuf *m, int off, struct pf_pdesc *pd)
 {
 	struct pf_state_peer	*src, *dst;
 	struct pf_state_key_cmp	 key;
@@ -5533,6 +5760,12 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 
 	ip = mtod(m0, struct ip *);
 
+	if (IN_MULTICAST(ntohl(ip->ip_dst.s_addr))) {
+		if (s)
+			PF_STATE_UNLOCK(s);
+		return;
+	}
+
 	bzero(&dst, sizeof(dst));
 	dst.sin_family = AF_INET;
 	dst.sin_len = sizeof(dst);
@@ -5562,7 +5795,65 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 	if (ifp == NULL)
 		goto bad;
 
+	else if (r->rt == PF_REPLYTO || (r->rt == PF_ROUTETO && ifp->if_type == IFT_ENC)) {
+		/* XXX: Copied from ifaof_ifpforaddr() since it mostly will not return NULL! */
+		struct sockaddr_in inaddr;
+		struct sockaddr *addr;
+		struct ifaddr *ifa;
+		char *cp, *cp2, *cp3;
+		char *cplim;
+
+		inaddr.sin_addr = ip->ip_dst;
+		inaddr.sin_family = AF_INET;
+		inaddr.sin_len = sizeof(inaddr);
+		inaddr.sin_port = 0;
+		addr = (struct sockaddr *)&inaddr;
+
+		IF_ADDR_RLOCK(ifp);
+		CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
+			if (ifa->ifa_addr->sa_family != AF_INET)
+				continue;
+			if (ifa->ifa_netmask == 0) {
+				if ((bcmp(addr, ifa->ifa_addr, addr->sa_len) == 0) ||
+				    (ifa->ifa_dstaddr &&
+				    (bcmp(addr, ifa->ifa_dstaddr, addr->sa_len) == 0))) {
+					IF_ADDR_RUNLOCK(ifp);
+					return;
+				}
+				continue;
+			}
+			if (ifp->if_flags & IFF_POINTOPOINT) {
+				if (bcmp(addr, ifa->ifa_dstaddr, addr->sa_len) == 0) {
+					IF_ADDR_RUNLOCK(ifp);
+					return;
+				}
+			} else {
+				cp = addr->sa_data;
+				cp2 = ifa->ifa_addr->sa_data;
+				cp3 = ifa->ifa_netmask->sa_data;
+				cplim = ifa->ifa_netmask->sa_len + (char *)ifa->ifa_netmask;
+				for (; cp3 < cplim; cp3++)
+					if ((*cp++ ^ *cp2++) & *cp3)
+						break;
+				if (cp3 == cplim) {
+					IF_ADDR_RUNLOCK(ifp);
+					return;
+				}
+			}
+		}
+		IF_ADDR_RUNLOCK(ifp);
+	}
+	else if (r->rt == PF_ROUTETO && r->direction == dir && in_localip(ip->ip_dst))
+		return;
+
 	if (oifp != ifp) {
+		if (in_broadcast(ip->ip_dst, oifp)) /* XXX: LOCKING of address list?! */
+			return;
+		if (s && r->rt == PF_ROUTETO && pd->nat_rule != NULL &&
+		    r->direction == PF_OUT && r->direction == dir &&
+		    pd->pf_mtag->routed < 2) {
+			pf_packet_undo_nat(m0, pd, ntohs(ip->ip_off), s, dir);
+		}
 		if (pf_test(PF_OUT, 0, ifp, &m0, inp) != PF_PASS)
 			goto bad;
 		else if (m0 == NULL)
@@ -5615,6 +5906,9 @@ pf_route(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 		error = EMSGSIZE;
 		KMOD_IPSTAT_INC(ips_cantfrag);
 		if (r->rt != PF_DUPTO) {
+			if (s && pd->nat_rule != NULL)
+				pf_packet_undo_nat(m0, pd, ntohs(ip->ip_off), s, dir);
+
 			icmp_error(m0, ICMP_UNREACH, ICMP_UNREACH_NEEDFRAG, 0,
 			    ifp->if_mtu);
 			goto done;
@@ -5694,6 +5988,12 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 
 	ip6 = mtod(m0, struct ip6_hdr *);
 
+	if (IN6_IS_ADDR_MULTICAST(&ip6->ip6_src)) {
+		if (s)
+			PF_STATE_UNLOCK(s);
+		return;
+	}
+
 	bzero(&dst, sizeof(dst));
 	dst.sin6_family = AF_INET6;
 	dst.sin6_len = sizeof(dst);
@@ -5725,8 +6025,64 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 
 	if (ifp == NULL)
 		goto bad;
+       else if (r->rt == PF_REPLYTO) {
+               /* XXX: Copied from ifaof_ifpforaddr() since it mostly will not return NULL! */
+               struct sockaddr_in6 inaddr6;
+               struct sockaddr *addr;
+               struct ifaddr *ifa;
+               char *cp, *cp2, *cp3;
+               char *cplim;
+
+               inaddr6.sin6_addr = ip6->ip6_dst;
+               inaddr6.sin6_family = AF_INET6;
+               inaddr6.sin6_len = sizeof(inaddr6);
+               inaddr6.sin6_port = 0;
+               inaddr6.sin6_flowinfo = 0;
+               addr = (struct sockaddr *)&inaddr6;
+
+               IF_ADDR_RLOCK(ifp);
+               CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
+                       if (ifa->ifa_addr->sa_family != AF_INET6)
+                               continue;
+                       if (ifa->ifa_netmask == 0) {
+                               if ((bcmp(addr, ifa->ifa_addr, addr->sa_len) == 0) ||
+                                   (ifa->ifa_dstaddr &&
+                                   (bcmp(addr, ifa->ifa_dstaddr, addr->sa_len) == 0))) {
+                                       IF_ADDR_RUNLOCK(ifp);
+                                       return;
+                               }
+                               continue;
+                       }
+                       if (ifp->if_flags & IFF_POINTOPOINT) {
+                               if (bcmp(addr, ifa->ifa_dstaddr, addr->sa_len) == 0) {
+                                       IF_ADDR_RUNLOCK(ifp);
+                                       return;
+                               }
+                       } else {
+                               cp = addr->sa_data;
+                               cp2 = ifa->ifa_addr->sa_data;
+                               cp3 = ifa->ifa_netmask->sa_data;
+                               cplim = ifa->ifa_netmask->sa_len + (char *)ifa->ifa_netmask;
+                               for (; cp3 < cplim; cp3++)
+                                       if ((*cp++ ^ *cp2++) & *cp3)
+                                               break;
+                               if (cp3 == cplim) {
+                                       IF_ADDR_RUNLOCK(ifp);
+                                       return;
+                               }
+                       }
+               }
+               IF_ADDR_RUNLOCK(ifp);
+       } else if (r->rt == PF_ROUTETO && r->direction == dir && in6_localaddr(&ip6->ip6_dst))
+	       return;
 
 	if (oifp != ifp) {
+		if (s && r->rt == PF_ROUTETO && pd->nat_rule != NULL &&
+		    r->direction == PF_OUT && r->direction == dir &&
+		    pd->pf_mtag->routed < 2) {
+			int ip_off = ((caddr_t)ip6 - m0->m_data) + sizeof(struct ip6_hdr);
+			pf_packet_undo_nat(m0, pd, ip_off, s, dir);
+		}
 		if (pf_test6(PF_OUT, PFIL_FWD, ifp, &m0, inp) != PF_PASS)
 			goto bad;
 		else if (m0 == NULL)
@@ -5760,9 +6116,12 @@ pf_route6(struct mbuf **m, struct pf_rule *r, int dir, struct ifnet *oifp,
 		nd6_output_ifp(ifp, ifp, m0, &dst, NULL);
 	else {
 		in6_ifstat_inc(ifp, ifs6_in_toobig);
-		if (r->rt != PF_DUPTO)
+		if (r->rt != PF_DUPTO) {
+			if (s && pd->nat_rule != NULL)
+				pf_packet_undo_nat(m0, pd, ((caddr_t)ip6 - m0->m_data) + sizeof(struct ip6_hdr), s, dir);
+
 			icmp6_error(m0, ICMP6_PACKET_TOO_BIG, 0, ifp->if_mtu);
-		else
+		} else
 			goto bad;
 	}
 
@@ -5927,7 +6286,9 @@ pf_test(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb *
 	struct pf_state		*s = NULL;
 	struct pf_ruleset	*ruleset = NULL;
 	struct pf_pdesc		 pd;
-	int			 off, dirndx, pqid = 0;
+	int			 off = 0, dirndx, pqid = 0;
+	int                      loopedfrom = 0;
+	struct ip_fw_args        dnflow;
 
 	PF_RULES_RLOCK_TRACKER;
 
@@ -5955,10 +6316,13 @@ pf_test(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb *
 
 	PF_RULES_RLOCK();
 
-	if (ip_divert_ptr != NULL &&
+	if ((ip_divert_ptr != NULL || ip_dn_io_ptr != NULL) &&
 	    ((ipfwtag = m_tag_locate(m, MTAG_IPFW_RULE, 0, NULL)) != NULL)) {
 		struct ipfw_rule_ref *rr = (struct ipfw_rule_ref *)(ipfwtag+1);
-		if (rr->info & IPFW_IS_DIVERT && rr->rulenum == 0) {
+		if (rr->info & IPFW_IS_DUMMYNET)
+			loopedfrom = 1;
+		if (rr->info & IPFW_IS_DUMMYNET ||
+		    (rr->info & IPFW_IS_DIVERT && rr->rulenum == 0)) {
 			if (pd.pf_mtag == NULL &&
 			    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
 				action = PF_DROP;
@@ -6013,6 +6377,10 @@ pf_test(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb *
 		struct tcphdr	th;
 
 		pd.hdr.tcp = &th;
+		dnflow.f_id._flags = th.th_flags;
+		dnflow.f_id.dst_port = ntohs(th.th_dport);
+		dnflow.f_id.src_port = ntohs(th.th_sport);
+
 		if (!pf_pull_hdr(m, off, &th, sizeof(th),
 		    &action, &reason, AF_INET)) {
 			log = action != PF_PASS;
@@ -6042,6 +6410,9 @@ pf_test(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb *
 		struct udphdr	uh;
 
 		pd.hdr.udp = &uh;
+		dnflow.f_id.dst_port = ntohs(uh.uh_dport);
+		dnflow.f_id.src_port = ntohs(uh.uh_sport);
+
 		if (!pf_pull_hdr(m, off, &uh, sizeof(uh),
 		    &action, &reason, AF_INET)) {
 			log = action != PF_PASS;
@@ -6100,7 +6471,7 @@ pf_test(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb *
 #endif
 
 	default:
-		action = pf_test_state_other(&s, dir, kif, m, &pd);
+		action = pf_test_state_other(&s, dir, kif, m, off, &pd);
 		if (action == PF_PASS) {
 			if (V_pfsync_update_state_ptr != NULL)
 				V_pfsync_update_state_ptr(s);
@@ -6144,7 +6515,14 @@ done:
 	}
 
 #ifdef ALTQ
-	if (action == PF_PASS && r->qid) {
+	if (s && s->qid) {
+		pd.act.pqid = s->pqid;
+		pd.act.qid = s->qid;
+	} else if (r->qid) {
+		pd.act.pqid = r->pqid;
+		pd.act.qid = r->qid;
+	}
+	if (action == PF_PASS && pd.act.qid) {
 		if (pd.pf_mtag == NULL &&
 		    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
 			action = PF_DROP;
@@ -6153,15 +6531,79 @@ done:
 			if (s != NULL)
 				pd.pf_mtag->qid_hash = pf_state_hash(s);
 			if (pqid || (pd.tos & IPTOS_LOWDELAY))
-				pd.pf_mtag->qid = r->pqid;
+				pd.pf_mtag->qid = pd.act.pqid;
 			else
-				pd.pf_mtag->qid = r->qid;
+				pd.pf_mtag->qid = pd.act.qid;
 			/* Add hints for ecn. */
 			pd.pf_mtag->hdr = h;
 		}
 
 	}
 #endif /* ALTQ */
+
+	if (pd.pf_mtag == NULL &&
+	    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
+		action = PF_DROP;
+		REASON_SET(&reason, PFRES_MEMORY);
+	}
+	if (s && (s->dnpipe || s->pdnpipe)) {
+		pd.act.dnpipe = s->dnpipe;
+		pd.act.pdnpipe = s->pdnpipe;
+		pd.act.flags = s->state_flags;
+	} else if (r->dnpipe || r->pdnpipe) {
+		pd.act.dnpipe = r->dnpipe;
+		pd.act.dnpipe = r->pdnpipe;
+		pd.act.flags = r->free_flags;
+	}
+
+	if (pd.act.dnpipe && ip_dn_io_ptr != NULL && loopedfrom != 1) {
+		if (dir != r->direction && pd.act.pdnpipe) {
+			dnflow.rule.info = pd.act.pdnpipe;
+		} else if (dir == r->direction) {
+			dnflow.rule.info = pd.act.dnpipe;
+		} else
+			goto continueprocessing;
+
+		if (pd.act.flags & PFRULE_DN_IS_PIPE)
+			dnflow.rule.info |= IPFW_IS_PIPE;
+		dnflow.f_id.addr_type = 4; /* IPv4 type */
+		dnflow.f_id.proto = pd.proto;
+		if (dir == PF_OUT && s != NULL && s->nat_rule.ptr != NULL &&
+		    s->nat_rule.ptr->action == PF_NAT)
+			dnflow.f_id.src_ip =
+			    ntohl(s->key[(s->direction == PF_IN)]->
+			    addr[(s->direction == PF_OUT)].v4.s_addr);
+		else
+			dnflow.f_id.src_ip = ntohl(h->ip_src.s_addr);
+		dnflow.f_id.dst_ip = ntohl(h->ip_dst.s_addr);
+		dnflow.f_id.extra = dnflow.rule.info;
+
+		if (m->m_flags & M_FASTFWD_OURS) {
+			pd.pf_mtag->flags |= PF_FASTFWD_OURS_PRESENT;
+			m->m_flags &= ~M_FASTFWD_OURS;
+		}
+
+		if (s != NULL && s->nat_rule.ptr)
+			pf_packet_undo_nat(m, &pd, off, s, dir);
+
+		ip_dn_io_ptr(m0,
+			(dir == PF_IN) ? DIR_IN : DIR_OUT,
+			&dnflow);
+		/* This is dummynet fast io processing */
+		if (*m0 != NULL) {
+			m_tag_delete(*m0, m_tag_first(*m0));
+			pd.pf_mtag->flags &= ~PF_PACKET_LOOPED;
+			if (s != NULL && s->nat_rule.ptr)
+				pf_packet_redo_nat(m, &pd, off, s, dir);
+		} else {
+			*m0 = NULL;
+			if (s)
+				PF_STATE_UNLOCK(s);
+			return (action);
+		}
+	} else
+		pd.pf_mtag->flags &= ~PF_PACKET_LOOPED;
+continueprocessing:
 
 	/*
 	 * connections redirected to loopback should not match sockets
@@ -6172,7 +6614,7 @@ done:
 	    pd.proto == IPPROTO_UDP) && s != NULL && s->nat_rule.ptr != NULL &&
 	    (s->nat_rule.ptr->action == PF_RDR ||
 	    s->nat_rule.ptr->action == PF_BINAT) &&
-	    IN_LOOPBACK(ntohl(pd.dst->v4.s_addr)))
+	    (ntohl(pd.dst->v4.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET)
 		m->m_flags |= M_SKIP_FIREWALL;
 
 	if (action == PF_PASS && r->divert.port && ip_divert_ptr != NULL &&
@@ -6317,6 +6759,9 @@ pf_test6(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb 
 	struct pf_ruleset	*ruleset = NULL;
 	struct pf_pdesc		 pd;
 	int			 off, terminal = 0, dirndx, rh_cnt = 0, pqid = 0;
+	int                      loopedfrom = 0;
+	struct m_tag		*dn_tag;
+	struct ip_fw_args        dnflow;
 
 	PF_RULES_RLOCK_TRACKER;
 	M_ASSERTPKTHDR(m);
@@ -6344,8 +6789,25 @@ pf_test6(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb 
 
 	PF_RULES_RLOCK();
 
+	if (ip_dn_io_ptr != NULL &&
+	    ((dn_tag = m_tag_locate(m, MTAG_IPFW_RULE, 0, NULL)) != NULL)) {
+		struct ipfw_rule_ref *rr = (struct ipfw_rule_ref *)(dn_tag+1);
+		if (pd.pf_mtag == NULL &&
+		    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
+			action = PF_DROP;
+			goto done;
+		}
+		if (rr->info & IPFW_IS_DUMMYNET)
+			loopedfrom = 1;
+		if (pd.pf_mtag->flags & PF_FASTFWD_OURS_PRESENT) {
+			m->m_flags |= M_FASTFWD_OURS;
+			pd.pf_mtag->flags &= ~PF_FASTFWD_OURS_PRESENT;
+		}
+		pd.pf_mtag->flags |= PF_PACKET_LOOPED;
+		m_tag_delete(m, dn_tag);
+	}
 	/* We do IP header normalization and packet reassembly here */
-	if (pf_normalize_ip6(m0, dir, kif, &reason, &pd) != PF_PASS) {
+	else if (pf_normalize_ip6(m0, dir, kif, &reason, &pd) != PF_PASS) {
 		action = PF_DROP;
 		goto done;
 	}
@@ -6454,6 +6916,10 @@ pf_test6(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb 
 		struct tcphdr	th;
 
 		pd.hdr.tcp = &th;
+		dnflow.f_id._flags = th.th_flags;
+		dnflow.f_id.dst_port = th.th_dport;
+		dnflow.f_id.src_port = th.th_sport;
+
 		if (!pf_pull_hdr(m, off, &th, sizeof(th),
 		    &action, &reason, AF_INET6)) {
 			log = action != PF_PASS;
@@ -6481,6 +6947,9 @@ pf_test6(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb 
 		struct udphdr	uh;
 
 		pd.hdr.udp = &uh;
+		dnflow.f_id.dst_port = uh.uh_dport;
+		dnflow.f_id.src_port = uh.uh_sport;
+
 		if (!pf_pull_hdr(m, off, &uh, sizeof(uh),
 		    &action, &reason, AF_INET6)) {
 			log = action != PF_PASS;
@@ -6537,7 +7006,7 @@ pf_test6(int dir, int pflags, struct ifnet *ifp, struct mbuf **m0, struct inpcb 
 	}
 
 	default:
-		action = pf_test_state_other(&s, dir, kif, m, &pd);
+		action = pf_test_state_other(&s, dir, kif, m, off, &pd);
 		if (action == PF_PASS) {
 			if (V_pfsync_update_state_ptr != NULL)
 				V_pfsync_update_state_ptr(s);
@@ -6587,7 +7056,14 @@ done:
 	}
 
 #ifdef ALTQ
-	if (action == PF_PASS && r->qid) {
+	if (s && s->qid) {
+		pd.act.pqid = s->pqid;
+		pd.act.qid = s->qid;
+	} else if (r->qid) {
+		pd.act.pqid = r->pqid;
+		pd.act.qid = r->qid;
+	}
+	if (action == PF_PASS && pd.act.qid) {
 		if (pd.pf_mtag == NULL &&
 		    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
 			action = PF_DROP;
@@ -6596,14 +7072,72 @@ done:
 			if (s != NULL)
 				pd.pf_mtag->qid_hash = pf_state_hash(s);
 			if (pd.tos & IPTOS_LOWDELAY)
-				pd.pf_mtag->qid = r->pqid;
+				pd.pf_mtag->qid = pd.act.pqid;
 			else
-				pd.pf_mtag->qid = r->qid;
+				pd.pf_mtag->qid = pd.act.qid;
 			/* Add hints for ecn. */
 			pd.pf_mtag->hdr = h;
 		}
 	}
 #endif /* ALTQ */
+
+	if (pd.pf_mtag == NULL &&
+	    ((pd.pf_mtag = pf_get_mtag(m)) == NULL)) {
+		action = PF_DROP;
+		REASON_SET(&reason, PFRES_MEMORY);
+	}
+	if (s && (s->dnpipe || s->pdnpipe)) {
+		pd.act.dnpipe = s->dnpipe;
+		pd.act.pdnpipe = s->pdnpipe;
+		pd.act.flags = s->state_flags;
+	} else if (r->dnpipe || r->pdnpipe) {
+		pd.act.dnpipe = r->dnpipe;
+		pd.act.dnpipe = r->pdnpipe;
+		pd.act.flags = r->free_flags;
+	}
+	if ((pd.act.dnpipe || pd.act.pdnpipe) &&
+	    ip_dn_io_ptr != NULL && loopedfrom != 1) {
+		if (dir != r->direction && pd.act.pdnpipe) {
+			dnflow.rule.info = pd.act.pdnpipe;
+		} else if (dir == r->direction && pd.act.dnpipe) {
+			dnflow.rule.info = pd.act.dnpipe;
+		} else
+			goto continueprocessing6;
+
+		if (pd.act.flags & PFRULE_DN_IS_PIPE)
+			dnflow.rule.info |= IPFW_IS_PIPE;
+		dnflow.f_id.addr_type = 6; /* IPv4 type */
+		dnflow.f_id.proto = pd.proto;
+		dnflow.f_id.src_ip = 0;
+		dnflow.f_id.dst_ip = 0;
+		if (dir == PF_OUT && s != NULL && s->nat_rule.ptr != NULL &&
+		    s->nat_rule.ptr->action == PF_NAT)
+			dnflow.f_id.src_ip6 = s->key[(s->direction == PF_IN)]->addr[0].v6;
+		else
+			dnflow.f_id.src_ip6 = h->ip6_src;
+		dnflow.f_id.dst_ip6 = h->ip6_dst;
+
+		if (s != NULL && s->nat_rule.ptr)
+			pf_packet_undo_nat(m, &pd, off, s, dir);
+
+		ip_dn_io_ptr(m0,
+			((dir == PF_IN) ? DIR_IN : DIR_OUT) | PROTO_IPV6,
+			&dnflow);
+		/* This is dummynet fast io processing */
+		if (*m0 != NULL) {
+			m_tag_delete(*m0, m_tag_first(*m0));
+			pd.pf_mtag->flags &= ~PF_PACKET_LOOPED;
+			if (s != NULL && s->nat_rule.ptr)
+				pf_packet_redo_nat(m, &pd, off, s, dir);
+		} else {
+			*m0 = NULL;
+			if (s)
+				PF_STATE_UNLOCK(s);
+			return (action);
+		}
+	} else
+		pd.pf_mtag->flags &= ~PF_PACKET_LOOPED;
+continueprocessing6:
 
 	if (dir == PF_IN && action == PF_PASS && (pd.proto == IPPROTO_TCP ||
 	    pd.proto == IPPROTO_UDP) && s != NULL && s->nat_rule.ptr != NULL &&

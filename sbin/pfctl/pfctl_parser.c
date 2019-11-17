@@ -704,8 +704,14 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 	int	i, opts;
 
 	if (verbose)
+#ifdef PF_USER_INFO
 		printf("@%d ", r->nr);
-	if (r->action > PF_NORDR)
+#else
+		printf("@%d(%u) ", r->nr, r->cuid);
+#endif
+	if (r->action == PF_MATCH)
+		printf("match");
+	else if (r->action > PF_NORDR)
 		printf("action(%d)", r->action);
 	else if (anchor_call[0]) {
 		if (anchor_call[0] == '_') {
@@ -856,8 +862,10 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 				printf(" code %u", r->code-1);
 		}
 	}
-	if (r->tos)
+	if (r->tos && (r->rule_flag & PFRULE_TOS))
 		printf(" tos 0x%2.2x", r->tos);
+	if (r->tos && (r->rule_flag & PFRULE_DSCP))
+		printf(" dscp 0x%2.2x", r->tos & DSCP_MASK);
 	if (r->prio)
 		printf(" prio %u", r->prio == PF_PRIO_ZERO ? 0 : r->prio);
 	if (r->scrub_flags & PFSTATE_SETMASK) {
@@ -1018,6 +1026,14 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 	}
 	if (r->label[0])
 		printf(" label \"%s\"", r->label);
+	if (r->dnpipe && r->pdnpipe)
+		printf(" %s(%d, %d)",
+		    r->free_flags & PFRULE_DN_IS_PIPE ? "dnpipe" : "dnqueue",
+		    r->dnpipe, r->pdnpipe);
+	else if (r->dnpipe)
+		printf(" %s %d",
+		    r->free_flags & PFRULE_DN_IS_PIPE ? "dnpipe" : "dnqueue",
+		    r->dnpipe);
 	if (r->qname[0] && r->pqname[0])
 		printf(" queue(%s, %s)", r->qname, r->pqname);
 	else if (r->qname[0])

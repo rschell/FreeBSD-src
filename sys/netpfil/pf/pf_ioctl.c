@@ -1576,7 +1576,9 @@ pfioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags, struct thread *td
 		rule->states_cur = counter_u64_alloc(M_WAITOK);
 		rule->states_tot = counter_u64_alloc(M_WAITOK);
 		rule->src_nodes = counter_u64_alloc(M_WAITOK);
+#ifdef PF_USER_INFO
 		rule->cuid = td->td_ucred->cr_ruid;
+#endif
 		rule->cpid = td->td_proc ? td->td_proc->p_pid : 0;
 		TAILQ_INIT(&rule->rpool.list);
 
@@ -1602,7 +1604,6 @@ pfioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags, struct thread *td
 			    V_ticket_pabuf));
 			ERROUT(EBUSY);
 		}
-
 		tail = TAILQ_LAST(ruleset->rules[rs_num].inactive.ptr,
 		    pf_rulequeue);
 		if (tail)
@@ -1686,8 +1687,29 @@ pfioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags, struct thread *td
 		}
 
 		rule->rpool.cur = TAILQ_FIRST(&rule->rpool.list);
+#ifndef PF_USER_INFO
+		if (rule->cuid) {
+			tail = TAILQ_FIRST(ruleset->rules[rs_num].active.ptr);
+			while ((tail != NULL) && (tail->cuid != rule->cuid))
+				tail = TAILQ_NEXT(tail, entries);
+			if (tail != NULL) {
+				rule->evaluations = tail->evaluations;
+				rule->packets[0] = tail->packets[0];
+				rule->packets[1] = tail->packets[1];
+				rule->bytes[0] = tail->bytes[0];
+				rule->bytes[1] = tail->bytes[1];
+			} else {
+				rule->evaluations = rule->packets[0] = rule->packets[1] =
+				    rule->bytes[0] = rule->bytes[1] = 0;
+			}
+		} else {
+			rule->evaluations = rule->packets[0] = rule->packets[1] =
+			    rule->bytes[0] = rule->bytes[1] = 0;
+		}
+#else
 		rule->evaluations = rule->packets[0] = rule->packets[1] =
 		    rule->bytes[0] = rule->bytes[1] = 0;
+#endif
 		TAILQ_INSERT_TAIL(ruleset->rules[rs_num].inactive.ptr,
 		    rule, entries);
 		ruleset->rules[rs_num].inactive.rcount++;
@@ -1837,7 +1859,9 @@ DIOCADDRULE_error:
 			newrule->states_cur = counter_u64_alloc(M_WAITOK);
 			newrule->states_tot = counter_u64_alloc(M_WAITOK);
 			newrule->src_nodes = counter_u64_alloc(M_WAITOK);
+#ifdef PF_USER_INFO
 			newrule->cuid = td->td_ucred->cr_ruid;
+#endif
 			newrule->cpid = td->td_proc ? td->td_proc->p_pid : 0;
 			TAILQ_INIT(&newrule->rpool.list);
 		}
@@ -2124,6 +2148,30 @@ relock_DIOCKILLSTATES:
 		psk->psk_killed = killed;
 		break;
 	}
+
+	case DIOCKILLSCHEDULE: {
+		struct pf_state         *state;
+		struct pfioc_schedule_kill *psk = (struct pfioc_schedule_kill *)addr;
+		int                      killed = 0;
+		u_int			 i;
+
+		for (i = 0; i <= pf_hashmask; i++) {
+			struct pf_idhash *ih = &V_pf_idhash[i];
+
+relock_DIOCKILLSCHEDULE:
+			PF_HASHROW_LOCK(ih);
+			LIST_FOREACH(state, &ih->states, entry) {
+			       if (!strcmp(psk->schedule, state->rule.ptr->schedule)) {
+					pf_unlink_state(state, PF_ENTER_LOCKED);
+					killed++;
+					goto relock_DIOCKILLSCHEDULE;
+				}
+			}
+			PF_HASHROW_UNLOCK(ih);
+               }
+               psk->numberkilled = killed;
+               break;
+       }
 
 	case DIOCADDSTATE: {
 		struct pfioc_state	*ps = (struct pfioc_state *)addr;
@@ -4249,8 +4297,10 @@ hook_pf(void)
 	pfh_inet = pfil_head_get(PFIL_TYPE_AF, AF_INET);
 	if (pfh_inet == NULL)
 		return (ESRCH); /* XXX */
-	pfil_add_hook_flags(pf_check_in, NULL, PFIL_IN | PFIL_WAITOK, pfh_inet);
-	pfil_add_hook_flags(pf_check_out, NULL, PFIL_OUT | PFIL_WAITOK, pfh_inet);
+	pfil_add_named_hook_flags(pf_check_in, NULL, "pf",
+	    PFIL_IN | PFIL_WAITOK, pfh_inet);
+	pfil_add_named_hook_flags(pf_check_out, NULL, "pf",
+	    PFIL_OUT | PFIL_WAITOK, pfh_inet);
 #endif
 #ifdef INET6
 	pfh_inet6 = pfil_head_get(PFIL_TYPE_AF, AF_INET6);
@@ -4263,8 +4313,10 @@ hook_pf(void)
 #endif
 		return (ESRCH); /* XXX */
 	}
-	pfil_add_hook_flags(pf_check6_in, NULL, PFIL_IN | PFIL_WAITOK, pfh_inet6);
-	pfil_add_hook_flags(pf_check6_out, NULL, PFIL_OUT | PFIL_WAITOK, pfh_inet6);
+	pfil_add_named_hook_flags(pf_check6_in, NULL, "pf",
+	    PFIL_IN | PFIL_WAITOK, pfh_inet6);
+	pfil_add_named_hook_flags(pf_check6_out, NULL, "pf",
+	    PFIL_OUT | PFIL_WAITOK, pfh_inet6);
 #endif
 
 	V_pf_pfil_hooked = 1;

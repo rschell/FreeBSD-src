@@ -8,6 +8,30 @@
 : ${DIALOG_ITEM_HELP=4}
 : ${DIALOG_ESC=255}
 
+if ! mdconfig -l | grep -q md3; then
+	mdconfig -a -u 3 -s 8m
+	newfs /dev/md3
+	mount /dev/md3 /mnt
+	tar -C /etc -cf - . | tar -C /mnt -xf -
+	sync; sync; sync
+	umount /mnt
+	mount /dev/md3 /etc
+fi
+
+# Mount /dev/ufs/pfSense_Install on factory to prevent USB stick disk used
+# to boot to be shown as an option to install
+if [ -e /dev/ufs/pfSense_Install -a ! -d /tmp/usb_install_media ]; then
+	mkdir -p /tmp/usb_install_media
+	mount /dev/ufs/pfSense_Install /tmp/usb_install_media
+fi
+
+if [ -f /root/factory-pre.sh ]; then
+	sh -x /root/factory-pre.sh >/tmp/factory-pre.debug 2>&1
+	unset CE_message
+else
+	CE_message=1
+fi
+
 MACHINE=`uname -m`
 
 # resolv.conf from DHCP ends up in here, so make sure the directory exists
@@ -33,7 +57,7 @@ if [ $? -eq 0 ]; then
 else
 	# Serial or other console
 	echo
-	echo "Welcome to FreeBSD!"
+	echo "Welcome to pfSense!"
 	echo
 	echo "Please choose the appropriate terminal type for your system."
 	echo "Common console types are:"
@@ -50,18 +74,46 @@ export TERM
 
 if [ -f /etc/installerconfig ]; then
 	if bsdinstall script /etc/installerconfig; then
-		dialog --backtitle "FreeBSD Installer" --title "Complete" --no-cancel --ok-label "Reboot" --pause "Installation of FreeBSD complete! Rebooting in 10 seconds" 10 30 10
+		dialog --backtitle "pfSense Installer" --title "Complete" --no-cancel --ok-label "Reboot" --pause "Installation of pfSense complete! Rebooting in 10 seconds" 10 30 10
 		reboot
 	else
-		dialog --backtitle "FreeBSD Installer" --title "Error" --textbox /tmp/bsdinstall_log 0 0
+		dialog --backtitle "pfSense Installer" --title "Error" --textbox /tmp/bsdinstall_log 0 0
 	fi
 	exit 
 fi
 
-dialog --backtitle "FreeBSD Installer" --title "Welcome" --extra-button --extra-label "Shell" --ok-label "Install" --cancel-label "Live CD" --yesno "Welcome to FreeBSD! Would you like to begin an installation or use the live CD?" 0 0
+if [ -n "${CE_message}" ]; then
+	msg="pfSense is Copyright 2004-2019 Rubicon Communications, LLC (Netgate).\n\npfSense is a federally registered trademark of Electric Sheep Fencing, LLC. Any unauthorized use of this trademark is prohibited by state and federal law and international law. Refer to our Trademark Usage Guidelines for how to properly use the marks. All rights reserved.\n\nAbsolutely No Commercial Distribution Is Allowed."
+else
+	msg="This software is only for use on platforms supplied by Rubicon Communications, LLC (Netgate).\n\npfSense is Copyright 2004-2019 Rubicon Communications, LLC (Netgate).\n\npfSense is a federally registered trademark of Electric Sheep Fencing, LLC. Any unauthorized use of this trademark is prohibited by state and federal law and international law. Refer to our Trademark Usage Guidelines for how to properly use the marks. All rights reserved.\n\nAbsolutely No Commercial Distribution Is Allowed"
+fi
 
-case $? in
-$DIALOG_OK)	# Install
+if [ ! -f /tmp/buildroom ]; then
+	exec 3>&1
+	dialog --backtitle "pfSense Installer" \
+		--title "Copyright and distribution notice" \
+		--ok-label "Accept" \
+		--msgbox "${msg}" 0 0 2>&1 1>&3
+	exec 3>&-
+fi
+
+IOPTS="\
+\"Install\" \"Install pfSense\" \
+\"Rescue Shell\" \"Launch a shell for rescue operations\""
+
+if [ -x /root/recover_configxml.sh ] ; then
+	IOPTS="${IOPTS} \"Recover config.xml\" \"Recover config.xml from a previous install\""
+fi
+
+exec 3>&1
+IMODE=`echo ${IOPTS} | xargs dialog --backtitle "pfSense Installer" \
+	--title "Welcome" \
+	--menu "Welcome to pfSense!" \
+	0 0 0 2>&1 1>&3` || exit 1
+exec 3>&-
+
+case "$IMODE" in
+"Install")	# Install
 	# If not netbooting, have the installer configure the network
 	dlv=`/sbin/sysctl -n vfs.nfs.diskless_valid 2> /dev/null`
 	if [ ${dlv:=0} -eq 0 -a ! -f /etc/diskless ]; then
@@ -71,18 +123,23 @@ $DIALOG_OK)	# Install
 	trap true SIGINT	# Ignore cntrl-C here
 	bsdinstall
 	if [ $? -eq 0 ]; then
-		dialog --backtitle "FreeBSD Installer" --title "Complete" --yes-label "Reboot" --no-label "Live CD" --yesno "Installation of FreeBSD complete! Would you like to reboot into the installed system now?" 0 0 && reboot
+		dialog --backtitle "pfSense Installer" --title "Complete" --yes-label "Reboot" --no-label "Shell" --yesno "Installation of pfSense complete! Would you like to reboot into the installed system now?" 0 0 && reboot
+		clear
+		echo "When finished, type 'exit' to reboot."
+		/bin/sh
+		reboot
 	else
 		. /etc/rc.local
 	fi
 	;;
-$DIALOG_CANCEL)	# Live CD
-	exit 0
-	;;
-$DIALOG_EXTRA)	# Shell
+"Rescue Shell")	# Rescue Shell
 	clear
 	echo "When finished, type 'exit' to return to the installer."
 	/bin/sh
+	. /etc/rc.local
+	;;
+"Recover config.xml") # Recover config.xml from a target drive
+	/root/recover_configxml.sh
 	. /etc/rc.local
 	;;
 esac

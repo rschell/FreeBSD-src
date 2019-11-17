@@ -603,7 +603,8 @@ serve_sched(struct mq *q, struct dn_sch_inst *si, uint64_t now)
 	struct dn_schk *s = si->sched;
 	struct mbuf *m = NULL;
 	int delay_line_idle = (si->dline.mq.head == NULL);
-	int done, bw;
+	int done;
+	uint32_t bw;
 
 	if (q == NULL) {
 		q = &def_q;
@@ -761,6 +762,7 @@ dummynet_send(struct mbuf *m)
 				dst = DIR_DROP;
 			} else {
 				dst = pkt->dn_dir;
+				pkt->rule.info |= IPFW_IS_DUMMYNET;
 				ifp = pkt->ifp;
 				tag->m_tag_cookie = MTAG_IPFW_RULE;
 				tag->m_tag_id = 0;

@@ -222,6 +222,7 @@ static struct filter_opts {
 #define FOM_TOS		0x04
 #define FOM_KEEP	0x08
 #define FOM_SRCTRACK	0x10
+#define FOM_DSCP	0x20
 #define FOM_SETPRIO	0x0400
 #define FOM_PRIO	0x2000
 	struct node_uid		*uid;
@@ -234,7 +235,9 @@ static struct filter_opts {
 	} flags;
 	struct node_icmp	*icmpspec;
 	u_int32_t		 tos;
+	u_int32_t		 dscp;
 	u_int32_t		 prob;
+	u_int32_t		 tracker;
 	struct {
 		int			 action;
 		struct node_state_opt	*options;
@@ -242,10 +245,14 @@ static struct filter_opts {
 	int			 fragment;
 	int			 allowopts;
 	char			*label;
+	char 			*schedule;
 	struct node_qassign	 queues;
 	char			*tag;
 	char			*match_tag;
 	u_int8_t		 match_tag_not;
+	u_int32_t		 dnpipe;
+	u_int32_t		 pdnpipe;
+	u_int32_t		 free_flags;
 	u_int			 rtableid;
 	u_int8_t		 prio;
 	u_int8_t		 set_prio[2];
@@ -257,6 +264,7 @@ static struct filter_opts {
 
 static struct antispoof_opts {
 	char			*label;
+	u_int32_t		 tracker;
 	u_int			 rtableid;
 } antispoof_opts;
 
@@ -349,6 +357,7 @@ int		 expand_skip_interface(struct node_if *);
 int	 check_rulestate(int);
 int	 getservice(char *);
 int	 rule_label(struct pf_rule *, char *);
+int	 rule_schedule(struct pf_rule *, char *);
 int	 rt_tableid_max(void);
 
 void	 mv_rules(struct pf_ruleset *, struct pf_ruleset *);
@@ -452,11 +461,11 @@ int	parseport(char *, struct range *r, int);
 
 %}
 
-%token	PASS BLOCK SCRUB RETURN IN OS OUT LOG QUICK ON FROM TO FLAGS
+%token	PASS BLOCK MATCH SCRUB RETURN IN OS OUT LOG QUICK ON FROM TO FLAGS
 %token	RETURNRST RETURNICMP RETURNICMP6 PROTO INET INET6 ALL ANY ICMPTYPE
 %token	ICMP6TYPE CODE KEEP MODULATE STATE PORT RDR NAT BINAT ARROW NODF
-%token	MINTTL ERROR ALLOWOPTS FASTROUTE FILENAME ROUTETO DUPTO REPLYTO NO LABEL
-%token	NOROUTE URPFFAILED FRAGMENT USER GROUP MAXMSS MAXIMUM TTL TOS DROP TABLE
+%token	MINTTL ERROR ALLOWOPTS FASTROUTE FILENAME ROUTETO DUPTO REPLYTO NO LABEL SCHEDULE
+%token	NOROUTE URPFFAILED FRAGMENT USER GROUP MAXMSS MAXIMUM TTL TOS DSCP DROP TABLE TRACKER
 %token	REASSEMBLE FRAGDROP FRAGCROP ANCHOR NATANCHOR RDRANCHOR BINATANCHOR
 %token	SET OPTIMIZATION TIMEOUT LIMIT LOGINTERFACE BLOCKPOLICY FAILPOLICY
 %token	RANDOMID REQUIREORDER SYNPROXY FINGERPRINTS NOSYNC DEBUG SKIP HOSTID
@@ -464,6 +473,7 @@ int	parseport(char *, struct range *r, int);
 %token	BITMASK RANDOM SOURCEHASH ROUNDROBIN STATICPORT PROBABILITY
 %token	ALTQ CBQ CODEL PRIQ HFSC FAIRQ BANDWIDTH TBRSIZE LINKSHARE REALTIME
 %token	UPPERLIMIT QUEUE PRIORITY QLIMIT HOGS BUCKETS RTABLE TARGET INTERVAL
+%token	DNPIPE DNQUEUE
 %token	LOAD RULESET_OPTIMIZATION PRIO
 %token	STICKYADDRESS MAXSRCSTATES MAXSRCNODES SOURCETRACK GLOBAL RULE
 %token	MAXSRCCONN MAXSRCCONNRATE OVERLOAD FLUSH SLOPPY
@@ -474,7 +484,7 @@ int	parseport(char *, struct range *r, int);
 %token	<v.i>			PORTBINARY
 %type	<v.interface>		interface if_list if_item_not if_item
 %type	<v.number>		number icmptype icmp6type uid gid
-%type	<v.number>		tos not yesno
+%type	<v.number>		tos dscp not yesno
 %type	<v.probability>		probability
 %type	<v.i>			no dir af fragcache optimizer
 %type	<v.i>			sourcetrack flush unaryop statelock
@@ -499,7 +509,7 @@ int	parseport(char *, struct range *r, int);
 %type	<v.gid>			gids gid_list gid_item
 %type	<v.route>		route
 %type	<v.redirection>		redirection redirpool
-%type	<v.string>		label stringall tag anchorname
+%type	<v.string>		label schedule stringall tag anchorname
 %type	<v.string>		string varstring numberstring
 %type	<v.keep_state>		keep
 %type	<v.state_opt>		state_opt_spec state_opt_list state_opt_item
@@ -1258,6 +1268,7 @@ antispoof	: ANTISPOOF logquick antispoof_ifspc af antispoof_opts {
 				if (rule_label(&r, $5.label))
 					YYERROR;
 				r.rtableid = $5.rtableid;
+				r.cuid = $5.tracker;
 				j = calloc(1, sizeof(struct node_if));
 				if (j == NULL)
 					err(1, "antispoof: calloc");
@@ -1307,6 +1318,7 @@ antispoof	: ANTISPOOF logquick antispoof_ifspc af antispoof_opts {
 					r.logif = $2.logif;
 					r.quick = $2.quick;
 					r.af = $4;
+					r.cuid = $5.tracker;
 					if (rule_label(&r, $5.label))
 						YYERROR;
 					r.rtableid = $5.rtableid;
@@ -1367,6 +1379,9 @@ antispoof_opt	: label	{
 				YYERROR;
 			}
 			antispoof_opts.label = $1;
+		}
+		| TRACKER number {
+			antispoof_opts.tracker = $2;
 		}
 		| RTABLE NUMBER				{
 			if ($2 < 0 || $2 > rt_tableid_max()) {
@@ -2082,6 +2097,11 @@ pfrule		: action dir logquick interface route af proto fromto
 			if (rule_label(&r, $9.label))
 				YYERROR;
 			free($9.label);
+			if  (rule_schedule(&r, $9.schedule))
+				YYERROR;
+			free($9.schedule);
+			if ($9.tracker)
+				r.cuid = $9.tracker;
 			r.flags = $9.flags.b1;
 			r.flagset = $9.flags.b2;
 			if (($9.flags.b1 & $9.flags.b2) != $9.flags.b1) {
@@ -2113,7 +2133,14 @@ pfrule		: action dir logquick interface route af proto fromto
 #endif
 			}
 
-			r.tos = $9.tos;
+			if ($9.tos) {
+				r.tos = $9.tos;
+				r.rule_flag |= PFRULE_TOS;
+			}
+			if ($9.dscp) {
+				r.tos = $9.dscp;
+				r.rule_flag |= PFRULE_DSCP;
+			}
 			r.keep_state = $9.keep.action;
 			o = $9.keep.options;
 
@@ -2431,6 +2458,15 @@ pfrule		: action dir logquick interface route af proto fromto
 			}
 #endif
 
+			if ($9.dnpipe) {
+				r.dnpipe = $9.dnpipe;
+				if ($9.free_flags & PFRULE_DN_IS_PIPE)
+					r.free_flags |= PFRULE_DN_IS_PIPE;
+				else
+					r.free_flags |= PFRULE_DN_IS_QUEUE;
+				r.pdnpipe = $9.pdnpipe;
+			}
+
 			expand_rule(&r, $4, $5.host, $7, $8.src_os,
 			    $8.src.host, $8.src.port, $8.dst.host, $8.dst.port,
 			    $9.uid, $9.gid, $9.icmpspec, "");
@@ -2503,6 +2539,14 @@ filter_opt	: USER uids {
 			filter_opts.marker |= FOM_TOS;
 			filter_opts.tos = $2;
 		}
+		| dscp {
+			if (filter_opts.marker & FOM_DSCP) {
+				yyerror("dscp cannot be redefined");
+				YYERROR;
+			}
+			filter_opts.marker |= FOM_DSCP;
+			filter_opts.dscp = $1;
+		}
 		| keep {
 			if (filter_opts.marker & FOM_KEEP) {
 				yyerror("modulate or keep cannot be redefined");
@@ -2511,6 +2555,9 @@ filter_opt	: USER uids {
 			filter_opts.marker |= FOM_KEEP;
 			filter_opts.keep.action = $1.action;
 			filter_opts.keep.options = $1.options;
+		}
+		| TRACKER number {
+			filter_opts.tracker = $2;
 		}
 		| FRAGMENT {
 			filter_opts.fragment = 1;
@@ -2525,12 +2572,45 @@ filter_opt	: USER uids {
 			}
 			filter_opts.label = $1;
 		}
+		| schedule {
+			if (filter_opts.schedule) {
+				yyerror("schedule label cannot be redefined");
+				YYERROR;
+			}
+			filter_opts.schedule = $1;
+		}
 		| qname	{
 			if (filter_opts.queues.qname) {
 				yyerror("queue cannot be redefined");
 				YYERROR;
 			}
 			filter_opts.queues = $1;
+		}
+		| DNPIPE number				{
+			filter_opts.dnpipe = $2;
+			filter_opts.free_flags |= PFRULE_DN_IS_PIPE;
+		}
+		| DNPIPE '(' number ')'			{
+			filter_opts.dnpipe = $3;
+			filter_opts.free_flags |= PFRULE_DN_IS_PIPE;
+		}
+		| DNPIPE '(' number comma number ')' {
+			filter_opts.pdnpipe = $5;
+			filter_opts.dnpipe = $3;
+			filter_opts.free_flags |= PFRULE_DN_IS_PIPE;
+		}
+		| DNQUEUE number			{
+			filter_opts.dnpipe = $2;
+			filter_opts.free_flags |= PFRULE_DN_IS_QUEUE;
+		}
+		| DNQUEUE '(' number comma number ')'	{
+			filter_opts.pdnpipe = $5;
+			filter_opts.dnpipe = $3;
+			filter_opts.free_flags |= PFRULE_DN_IS_QUEUE;
+		}
+		| DNQUEUE '(' number ')'		{
+			filter_opts.dnpipe = $3;
+			filter_opts.free_flags |= PFRULE_DN_IS_QUEUE;
 		}
 		| TAG string				{
 			filter_opts.tag = $2;
@@ -2658,6 +2738,10 @@ action		: PASS 			{
 			$$.b2 = failpolicy;
 			$$.w = returnicmpdefault;
 			$$.w2 = returnicmp6default;
+		}
+		| MATCH			{
+			$$.b1 = PF_MATCH;
+			$$.b2 = $$.w = $$.w2 = 0;
 		}
 		| BLOCK blockspec	{ $$ = $2; $$.b1 = PF_DROP; }
 		;
@@ -3638,6 +3722,48 @@ tos	: STRING			{
 		}
 		;
 
+dscp	: DSCP STRING			{
+			if (!strcmp($2, "EF"))
+				$$ = DSCP_EF;
+			else if (!strcmp($2, "VA"))
+				$$ = DSCP_VA;
+			else if (!strcmp($2, "af11"))
+				$$ = DSCP_AF11;
+			else if (!strcmp($2, "af12"))
+				$$ = DSCP_AF12;
+			else if (!strcmp($2, "af13"))
+				$$ = DSCP_AF13;
+			else if (!strcmp($2, "af21"))
+				$$ = DSCP_AF21;
+			else if (!strcmp($2, "af22"))
+				$$ = DSCP_AF22;
+			else if (!strcmp($2, "af23"))
+				$$ = DSCP_AF23;
+			else if (!strcmp($2, "af31"))
+				$$ = DSCP_AF31;
+			else if (!strcmp($2, "af32"))
+				$$ = DSCP_AF32;
+			else if (!strcmp($2, "af33"))
+				$$ = DSCP_AF33;
+			else if (!strcmp($2, "af41"))
+				$$ = DSCP_AF41;
+			else if (!strcmp($2, "af42"))
+				$$ = DSCP_AF42;
+			else if (!strcmp($2, "af43"))
+				$$ = DSCP_AF43;
+			else if ($2[0] == '0' && $2[1] == 'x')
+				$$ = strtoul($2, NULL, 16) * 4;
+			else
+				$$ = strtoul($2, NULL, 10) * 4;
+			if (!$$ || $$ > 255) {
+				yyerror("illegal dscp value %s", $2);
+				free($2);
+				YYERROR;
+			}
+			free($2);
+		}
+		;
+
 sourcetrack	: SOURCETRACK		{ $$ = PF_SRCTRACK; }
 		| SOURCETRACK GLOBAL	{ $$ = PF_SRCTRACK_GLOBAL; }
 		| SOURCETRACK RULE	{ $$ = PF_SRCTRACK_RULE; }
@@ -3840,6 +3966,11 @@ state_opt_item	: MAXIMUM NUMBER		{
 		;
 
 label		: LABEL STRING			{
+			$$ = $2;
+		}
+		;
+
+schedule	: SCHEDULE STRING 		{
 			$$ = $2;
 		}
 		;
@@ -4694,6 +4825,15 @@ filter_consistent(struct pf_rule *r, int anchor_call)
 		    "synproxy state or modulate state");
 		problems++;
 	}
+	if ((r->rule_flag & PFRULE_TOS) && (r->rule_flag & PFRULE_DSCP)) {
+		yyerror("tos and dscp cannot be used together");
+		problems++;
+	}
+	if (r->dnpipe && r->pdnpipe && !r->direction) {
+		yyerror("dummynet cannot be specified without direction");
+		problems++;
+	}
+
 	return (-problems);
 }
 
@@ -5252,6 +5392,7 @@ expand_rule(struct pf_rule *r,
 	int			 added = 0, error = 0;
 	char			 ifname[IF_NAMESIZE];
 	char			 label[PF_RULE_LABEL_SIZE];
+	char			 schedule[PF_RULE_LABEL_SIZE];
 	char			 tagname[PF_TAG_NAME_SIZE];
 	char			 match_tagname[PF_TAG_NAME_SIZE];
 	struct pf_pooladdr	*pa;
@@ -5259,6 +5400,8 @@ expand_rule(struct pf_rule *r,
 	u_int8_t		 flags, flagset, keep_state;
 
 	if (strlcpy(label, r->label, sizeof(label)) >= sizeof(label))
+		errx(1, "expand_rule: strlcpy");
+	if (strlcpy(schedule, r->schedule, sizeof(schedule)) > sizeof(schedule))
 		errx(1, "expand_rule: strlcpy");
 	if (strlcpy(tagname, r->tagname, sizeof(tagname)) >= sizeof(tagname))
 		errx(1, "expand_rule: strlcpy");
@@ -5311,6 +5454,9 @@ expand_rule(struct pf_rule *r,
 		if (strlcpy(r->label, label, sizeof(r->label)) >=
 		    sizeof(r->label))
 			errx(1, "expand_rule: strlcpy");
+		if (strlcpy(r->schedule, schedule, sizeof(r->schedule)) >=
+			sizeof(r->schedule))
+			errx(1, "expand_rule: strlcpy");
 		if (strlcpy(r->tagname, tagname, sizeof(r->tagname)) >=
 		    sizeof(r->tagname))
 			errx(1, "expand_rule: strlcpy");
@@ -5319,6 +5465,8 @@ expand_rule(struct pf_rule *r,
 			errx(1, "expand_rule: strlcpy");
 		expand_label(r->label, PF_RULE_LABEL_SIZE, r->ifname, r->af,
 		    src_host, src_port, dst_host, dst_port, proto->proto);
+		expand_label(r->schedule, PF_RULE_LABEL_SIZE, r->ifname, r->af,
+			src_host, src_port, dst_host, dst_port, proto->proto);
 		expand_label(r->tagname, PF_TAG_NAME_SIZE, r->ifname, r->af,
 		    src_host, src_port, dst_host, dst_port, proto->proto);
 		expand_label(r->match_tagname, PF_TAG_NAME_SIZE, r->ifname,
@@ -5503,8 +5651,11 @@ lookup(char *s)
 		{ "debug",		DEBUG},
 		{ "divert-reply",	DIVERTREPLY},
 		{ "divert-to",		DIVERTTO},
+		{ "dnpipe",		DNPIPE},
+		{ "dnqueue",		DNQUEUE},
 		{ "drop",		DROP},
 		{ "drop-ovl",		FRAGDROP},
+		{ "dscp",		DSCP},
 		{ "dup-to",		DUPTO},
 		{ "fail-policy",	FAILPOLICY},
 		{ "fairq",		FAIRQ},
@@ -5537,6 +5688,7 @@ lookup(char *s)
 		{ "load",		LOAD},
 		{ "log",		LOG},
 		{ "loginterface",	LOGINTERFACE},
+		{ "match",		MATCH},
 		{ "max",		MAXIMUM},
 		{ "max-mss",		MAXMSS},
 		{ "max-src-conn",	MAXSRCCONN},
@@ -5584,6 +5736,7 @@ lookup(char *s)
 		{ "rtable",		RTABLE},
 		{ "rule",		RULE},
 		{ "ruleset-optimization",	RULESET_OPTIMIZATION},
+		{ "schedule",		SCHEDULE},
 		{ "scrub",		SCRUB},
 		{ "set",		SET},
 		{ "set-tos",		SETTOS},
@@ -5605,6 +5758,7 @@ lookup(char *s)
 		{ "timeout",		TIMEOUT},
 		{ "to",			TO},
 		{ "tos",		TOS},
+		{ "tracker",		TRACKER},
 		{ "ttl",		TTL},
 		{ "upperlimit",		UPPERLIMIT},
 		{ "urpf-failed",	URPFFAILED},
@@ -6213,6 +6367,20 @@ rule_label(struct pf_rule *r, char *s)
 		    sizeof(r->label)) {
 			yyerror("rule label too long (max %d chars)",
 			    sizeof(r->label)-1);
+			return (-1);
+		}
+	}
+	return (0);
+}
+
+int
+rule_schedule(struct pf_rule *r, char *s)
+{
+	if (s) {
+		if (strlcpy(r->schedule, s, sizeof(r->label)) >=
+		   sizeof(r->label)) {
+			yyerror("rule schedule label too long (max %d chars)",
+				sizeof(r->label)-1);
 			return (-1);
 		}
 	}

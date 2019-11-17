@@ -149,6 +149,8 @@ fsck_readdir(struct inodesc *idesc)
 	struct direct *dp, *ndp;
 	struct bufarea *bp;
 	long size, blksiz, subsume_ndp;
+	long size, blksiz, fix, dploc;
+	int dc;
 
 	subsume_ndp = 0;
 	blksiz = idesc->id_numfrags * sblock.fs_fsize;
@@ -221,6 +223,7 @@ dircheck(struct inodesc *idesc, struct bufarea *bp, struct direct *dp)
 	u_int8_t namlen;
 	int spaceleft, modified, unused;
 
+	modified = 0;
 	spaceleft = DIRBLKSIZ - (idesc->id_loc % DIRBLKSIZ);
 	size = DIRSIZ(0, dp);
 	if (dp->d_reclen == 0 ||

@@ -102,7 +102,7 @@ boot_disk(struct gmesh *mesh)
 	const char *type, *desc;
 	char diskdesc[512];
 	char *chosen;
-	int i, err, selected, n = 0;
+	int i, err, selected, fd, n = 0;
 
 	LIST_FOREACH(classp, &mesh->lg_class, lg_class) {
 		if (strcmp(classp->lg_name, "DISK") != 0 &&
@@ -129,6 +129,19 @@ boot_disk(struct gmesh *mesh)
 					continue;
 				if (strncmp(pp->lg_name, "cd", 2) == 0)
 					continue;
+				/* Skip memory disk used by factory mfsroot */
+				if (strncmp(pp->lg_name, "md", 2) == 0)
+					continue;
+
+				/*
+				 * Check if disk is available to be open for
+				 * write operations, it helps to prevent USB
+				 * stick used to boot to be shown
+				 */
+				fd = g_open(pp->lg_name, 1);
+				if (fd == -1)
+					continue;
+				g_close(fd);
 
 				disks = realloc(disks, (++n)*sizeof(disks[0]));
 				disks[n-1].name = pp->lg_name;
@@ -154,7 +167,7 @@ boot_disk(struct gmesh *mesh)
 
 	if (n > 1) {
 		err = dlg_menu("Partitioning",
-		    "Select the disk on which to install FreeBSD.", 0, 0, 0,
+		    "Select the disk on which to install pfSense.", 0, 0, 0,
 		    n, disks, &selected, NULL);
 
 		chosen = (err == 0) ? strdup(disks[selected].name) : NULL;
@@ -236,7 +249,7 @@ query:
 		dialog_vars.defaultno = TRUE;
 
 	snprintf(message, sizeof(message), "Would you like to use this entire "
-	    "disk (%s) for FreeBSD or partition it to share it with other "
+	    "disk (%s) for pfSense or partition it to share it with other "
 	    "operating systems? Using the entire disk will erase any data "
 	    "currently stored there.", disk);
 	choice = dialog_yesno("Partition", message, 0, 0);
@@ -251,7 +264,7 @@ query:
 
 		sprintf(warning, "The existing partition scheme on this "
 		    "disk (%s) is not bootable on this platform. To install "
-		    "FreeBSD, it must be repartitioned. This will destroy all "
+		    "pfSense, it must be repartitioned. This will destroy all "
 		    "data on the disk. Are you sure you want to proceed?",
 		    scheme);
 		subchoice = dialog_yesno("Non-bootable Disk", warning, 0, 0);
@@ -335,7 +348,7 @@ wizard_makeparts(struct gmesh *mesh, const char *disk, const char *fstype,
 		humanize_number(neededstr, 7, MIN_FREE_SPACE, "B", HN_AUTOSCALE,
 		    HN_DECIMAL);
 		sprintf(message, "There is not enough free space on %s to "
-		    "install FreeBSD (%s free, %s required). Would you like "
+		    "install pfSense (%s free, %s required). Would you like "
 		    "to choose another disk or to open the partition editor?",
 		    disk, availablestr, neededstr);
 

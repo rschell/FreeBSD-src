@@ -97,6 +97,8 @@ CTASSERT(sizeof (struct ether_addr) == ETHER_ADDR_LEN);
 
 VNET_DEFINE(struct pfil_head, link_pfil_hook);	/* Packet filter hooks */
 
+SYSCTL_DECL(_net_link);
+
 /* netgraph node hooks for ng_ether(4) */
 void	(*ng_ether_input_p)(struct ifnet *ifp, struct mbuf **mp);
 void	(*ng_ether_input_orphan_p)(struct ifnet *ifp, struct mbuf *m);
@@ -730,6 +732,9 @@ vnet_ether_init(__unused void *arg)
 	if ((i = pfil_head_register(&V_link_pfil_hook)) != 0)
 		printf("%s: WARNING: unable to register pfil link hook, "
 			"error %d\n", __func__, i);
+	else
+                pfil_head_export_sysctl(&V_link_pfil_hook,
+                        SYSCTL_STATIC_CHILDREN(_net_link));
 #ifdef VIMAGE
 	netisr_register_vnet(&ether_nh);
 #endif
@@ -798,6 +803,7 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 {
 	struct ether_header *eh;
 	int i, isr;
+	uint32_t ours;
 	u_short ether_type;
 
 	KASSERT(ifp != NULL, ("%s: NULL interface pointer", __func__));
@@ -809,7 +815,9 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 
 		if (i != 0 || m == NULL)
 			return;
-	}
+		ours = m->m_flags & (M_FASTFWD_OURS | M_IP_NEXTHOP);
+	} else
+		ours = 0;
 
 	eh = mtod(m, struct ether_header *);
 	ether_type = ntohs(eh->ether_type);
@@ -848,6 +856,8 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 	 */
 	m->m_flags &= ~M_VLANTAG;
 	m_clrprotoflags(m);
+	if (ours)
+		m->m_flags |= ours;
 	m_adj(m, ETHER_HDR_LEN);
 
 	/*
@@ -1009,7 +1019,6 @@ ether_reassign(struct ifnet *ifp, struct vnet *new_vnet, char *unused __unused)
 }
 #endif
 
-SYSCTL_DECL(_net_link);
 SYSCTL_NODE(_net_link, IFT_ETHER, ether, CTLFLAG_RW, 0, "Ethernet");
 
 #if 0

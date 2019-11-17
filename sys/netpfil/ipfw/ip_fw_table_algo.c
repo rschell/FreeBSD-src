@@ -4526,13 +4526,10 @@ static __inline int
 ta_lookup_find_mhash(struct mhashbhead *head, uint32_t hash2,
     struct macdata *mac, uint32_t *val, uint8_t *ea, void **te)
 {
-	struct macdata any;
 	struct mhashentry *ent;
 
-	memset(any.addr, 0, sizeof(any.addr));
 	SLIST_FOREACH(ent, &head[hash2], next) {
-		if (memcmp(&ent->mac->addr, any.addr, sizeof(any.addr)) != 0 &&
-		    memcmp(&ent->mac->addr, mac->addr, sizeof(mac->addr)) != 0)
+		if (memcmp(&ent->mac->addr, mac->addr, sizeof(mac->addr)) != 0)
 			continue;
 		*val = ent->mac->value;
 		if (te != NULL)
@@ -4551,6 +4548,12 @@ ta_lookup_mhash(struct table_info *ti, void *key, uint32_t keylen,
 	struct mhashbhead *head;
 	uint32_t hash2, hsize;
 
+	/* any any always match. */
+	if (ti->xstate != NULL) {
+		*te = ti->xstate;
+		return (1);
+	}
+
 	/*
 	 * Look three times for a MAC is still faster than looking at whole
 	 * table (128 entries by default).
@@ -4559,21 +4562,21 @@ ta_lookup_mhash(struct table_info *ti, void *key, uint32_t keylen,
 	hsize = 1 << (ti->data & 0xFF);
 	hash2 = hash_mac2(key, hsize);
 	if (ta_lookup_find_mhash(head, hash2,
-	    (struct macdata *)key, val, NULL, te) == 1)
+	    (struct macdata *)key, val, ea, te) == 1)
 		return (1);
 
 	/* src any */
 	memcpy(mac.addr, key, 6);
 	memset(mac.addr + 6, 0, 6);
 	hash2 = hash_mac2(mac.addr, hsize);
-	if (ta_lookup_find_mhash(head, hash2, &mac, val, NULL, te) == 1)
+	if (ta_lookup_find_mhash(head, hash2, &mac, val, ea, te) == 1)
 		return (1);
 
 	/* dst any */
 	memset(mac.addr, 0, 6);
-	memcpy(mac.addr + 6, (uintptr_t *)key + 6, 6);
+	memcpy(mac.addr + 6, (uint8_t *)key + 6, 6);
 	hash2 = hash_mac2(mac.addr, hsize);
-	if (ta_lookup_find_mhash(head, hash2, &mac, val, NULL, te) == 1)
+	if (ta_lookup_find_mhash(head, hash2, &mac, val, ea, te) == 1)
 		return (1);
 
 	return (0);
@@ -4631,6 +4634,8 @@ ta_foreach_mhash(void *ta_state, struct table_info *ti, ta_foreach_f *f,
 
 	cfg = (struct mhash_cfg *)ta_state;
 
+	if (ti->xstate != NULL)
+		f(ti->xstate, arg);
 	for (i = 0; i < cfg->size; i++)
 		SLIST_FOREACH_SAFE(ent, &cfg->head[i], next, ent_next)
 			f(ent, arg);
@@ -4666,6 +4671,7 @@ ta_find_mhash_tentry(void *ta_state, struct table_info *ti,
 	struct mhashentry *ent;
 	struct tentry_info tei;
 	uint32_t hash2;
+	u_char any[12];
 
 	cfg = (struct mhash_cfg *)ta_state;
 
@@ -4676,6 +4682,14 @@ ta_find_mhash_tentry(void *ta_state, struct table_info *ti,
 	tei.subtype = AF_LINK;
 
 	memcpy(mac.addr, tei.paddr, sizeof(mac.addr) + sizeof(mac.mask));
+
+	/* any any */
+	memset(any, 0, sizeof(any));
+	if (memcmp(mac.addr, any, sizeof(mac.addr)) == 0 &&
+	    ti->xstate != NULL) {
+		ta_dump_mhash_tentry(ta_state, ti, ti->xstate, tent);
+		return (0);
+	}
 
 	/* Check for existence */
 	hash2 = hash_mac2(mac.addr, cfg->size);
@@ -4735,6 +4749,7 @@ ta_add_mhash(void *ta_state, struct table_info *ti, struct tentry_info *tei,
 	struct mhashentry *ent, *tmp;
 	struct ta_buf_mhash *tb;
 	uint32_t hash2, value;
+	u_char any[12];
 
 	cfg = (struct mhash_cfg *)ta_state;
 	tb = (struct ta_buf_mhash *)ta_buf;
@@ -4747,6 +4762,32 @@ ta_add_mhash(void *ta_state, struct table_info *ti, struct tentry_info *tei,
 
 	if (tei->subtype != AF_LINK)
 		return (EINVAL);
+
+	/* any any */
+	memset(any, 0, sizeof(any));
+	if (memcmp(mac->addr, any, sizeof(mac->addr)) == 0) {
+		if (ti->xstate != NULL) {
+			if ((tei->flags & TEI_FLAGS_UPDATE) == 0)
+				return (EEXIST);
+			/* Record already exists. Update value if we're asked to */
+			value = ((struct mhashentry *)ti->xstate)->mac->value;
+			((struct mhashentry *)ti->xstate)->mac->value = tei->value;
+			tei->value = value;
+			/* Indicate that update has happened instead of addition */
+			tei->flags |= TEI_FLAGS_UPDATED;
+			*pnum = 0;
+		} else {
+			if ((tei->flags & TEI_FLAGS_DONTADD) != 0)
+				return (EFBIG);
+			ti->xstate = ent;
+			tb->ent_ptr = NULL;
+			*pnum = 1;
+
+			/* Update counters */
+			cfg->items++;
+		}
+		return (0);
+	}
 
 	/* Check for existence */
 	hash2 = hash_mac2(mac->addr, cfg->size);
@@ -4804,6 +4845,7 @@ ta_del_mhash(void *ta_state, struct table_info *ti, struct tentry_info *tei,
 	struct mhashentry *tmp, *tmp_next;
 	struct ta_buf_mhash *tb;
 	uint32_t hash2;
+	u_char any[12];
 
 	cfg = (struct mhash_cfg *)ta_state;
 	tb = (struct ta_buf_mhash *)ta_buf;
@@ -4811,6 +4853,18 @@ ta_del_mhash(void *ta_state, struct table_info *ti, struct tentry_info *tei,
 
 	if (tei->masklen != ETHER_ADDR_LEN * 8)
 		return (EINVAL);
+
+	/* any any */
+	memset(any, 0, sizeof(any));
+	if (memcmp(mac->addr, any, sizeof(mac->addr)) == 0 &&
+	    ti->xstate != NULL) {
+		cfg->items--;
+		tb->ent_ptr = ti->xstate;
+		tei->value = ((struct mhashentry *)ti->xstate)->mac->value;
+		ti->xstate = NULL;
+		*pnum = 1;
+		return (0);
+	}
 
 	hash2 = hash_mac2(mac->addr, cfg->size);
 	SLIST_FOREACH_SAFE(tmp, &cfg->head[hash2], next, tmp_next) {
