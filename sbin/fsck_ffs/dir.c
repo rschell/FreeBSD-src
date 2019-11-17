@@ -149,7 +149,6 @@ fsck_readdir(struct inodesc *idesc)
 	struct direct *dp, *ndp;
 	struct bufarea *bp;
 	long size, blksiz, subsume_ndp;
-	long size, blksiz, fix, dploc;
 	int dc;
 
 	subsume_ndp = 0;
