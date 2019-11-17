@@ -1871,6 +1871,7 @@ do {								\
 				break;
 			}
 
+
 			case O_VIA:
 			{
 				void *ifte = NULL;

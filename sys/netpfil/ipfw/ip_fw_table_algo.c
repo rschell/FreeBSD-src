@@ -4597,7 +4597,6 @@ ta_init_mhash(struct ip_fw_chain *ch, void **ta_state, struct table_info *ti,
 	for (i = 0; i < cfg->size; i++)
 		SLIST_INIT(&cfg->head[i]);
 	*ta_state = cfg;
-	ti->xstate = NULL;
 	ti->state = cfg->head;
 	ti->data = ta_log2(cfg->size);
 	ti->lookup = ta_lookup_mhash;

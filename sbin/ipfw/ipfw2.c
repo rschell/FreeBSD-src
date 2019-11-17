@@ -3566,6 +3566,12 @@ add_mac(ipfw_insn *cmd, char *av[], int cblen, struct tidx *tstate)
 	if (av[1] == NULL)
 		errx(EX_DATAERR, "MAC dst src");
 
+	if (strncmp(av[0], "table(", 6) == 0) {
+		fill_table(cmd, av[0], O_MACADDR2_LOOKUP, tstate);
+		CHECK_CMDLEN;
+		return (cmd);
+	}
+
 	cmd->opcode = O_MACADDR2;
 	cmd->len = (cmd->len & (F_NOT | F_OR)) | F_INSN_SIZE(ipfw_insn_mac);
 	CHECK_CMDLEN;

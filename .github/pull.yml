@@ -1,0 +1,5 @@
+version: "1"
+rules:
+  - base: Build-12.1-clean
+    upstream: pfsense:releng/12.1
+    mergeMethod: hardreset
