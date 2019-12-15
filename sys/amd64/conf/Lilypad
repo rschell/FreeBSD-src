@@ -188,6 +188,8 @@ options 	COMPAT_LINUXKPI
 
 # Required by mlx5en
 options		RATELIMIT		# TX rate limiting support
+device    mlxfw
+device    firmware
 
 # Default serial speed
 options		CONSPEED=115200
