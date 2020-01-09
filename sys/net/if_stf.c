@@ -352,7 +352,7 @@ stf_encapcheck(const struct mbuf *m, int off, int proto, void *arg)
 	 * fail on: src = 10.1.1.1, ia6->ia_addr = 2002:0b00:.../24
 	 */
 
-		memcpy(&sin4mask.sin_addr, GET_V4(&mask6), sizeof(sin4mask));
+		memcpy(&sin4mask.sin_addr, GET_V4(&mask6), sizeof(sin4mask.sin_addr));
 
 		if ((sin4addr.sin_addr.s_addr & sin4mask.sin_addr.s_addr) !=
 		    (ip.ip_src.s_addr & sin4mask.sin_addr.s_addr)) {
