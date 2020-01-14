@@ -32,31 +32,11 @@ import argparse
 import scapy.all as sp
 import socket
 import sys
-from sniffer import Sniffer
-from time import sleep
-
-def check_icmp6_error(args, packet):
-	ip6 = packet.getlayer(sp.IPv6)
-	if not ip6:
-		return False
-	oip6 = sp.IPv6(src=args.src[0], dst=args.to[0])
-	if ip6.dst != oip6.src:
-		return False
-	icmp6 = packet.getlayer(sp.ICMPv6DestUnreach)
-	if not icmp6:
-		return False
-	# ICMP6_DST_UNREACH_NOPORT 4
-	if icmp6.code != 4:
-		return False
-	# Should we check the payload as well?
-	# We are running in a very isolated environment and nothing else
-	# should trigger an ICMPv6 Dest Unreach / Port Unreach so leave it.
-	#icmp6.display()
-	return True
+import binascii
 
 def main():
-	parser = argparse.ArgumentParser("frag6.py",
-		description="IPv6 fragementation test tool")
+	parser = argparse.ArgumentParser("scapyi386.py",
+		description="IPv6 Ethernet Dest MAC test")
 	parser.add_argument('--sendif', nargs=1,
 		required=True,
 		help='The interface through which the packet will be sent')
@@ -72,61 +52,23 @@ def main():
 	parser.add_argument('--debug',
 		required=False, action='store_true',
 		help='Enable test debugging')
+	parser.add_argument('--mldraw01',
+		required=False, action='store_true',
+		help='Multicast Listener Query Raw01')
 
 	args = parser.parse_args()
 
-
-	# Start sniffing on recvif
-	sniffer = Sniffer(args, check_icmp6_error)
-
-
-	########################################################################
-	#
-	# Atomic fragment.
-	#
-	# A:  Nothing listening on UDP port.
-	# R:  ICMPv6 dst unreach, unreach port.
-	#
-	ip6f01 = sp.Ether() / \
-		sp.IPv6(src=args.src[0], dst=args.to[0]) / \
-		sp.IPv6ExtHdrFragment(offset=0, m=0, id=3) / \
-		sp.UDP(dport=3456, sport=6543)
-	if args.debug :
-		ip6f01.display()
-	sp.sendp(ip6f01, iface=args.sendif[0], verbose=False)
-
-	sleep(0.10)
-	sniffer.setEnd()
-	sniffer.join()
-	if not sniffer.foundCorrectPacket:
+	pkt = None
+	if args.mldraw01:
+		pkt = sp.Ether() / \
+			sp.IPv6(dst="ff02::1", hlim=1, nh=0) / \
+			sp.IPv6ExtHdrHopByHop(options = sp.RouterAlert(value=0)) / \
+			sp.ICMPv6MLQuery()
+	if pkt is None:
 		sys.exit(1)
-
-
-	# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # ##
-	#
-	# Atomic fragment with extension header.
-	#
-	# A:  Nothing listening on UDP port.
-	# R:  ICMPv6 dst unreach, unreach port.
-	#
-	# Start sniffing on recvif
-	sniffer = Sniffer(args, check_icmp6_error)
-
-	ip6f01 = sp.Ether() / \
-		sp.IPv6(src=args.src[0], dst=args.to[0]) / \
-		sp.IPv6ExtHdrDestOpt(options = \
-		    sp.PadN(optdata="\x00\x00\x00\x00\x00\x00")) / \
-		sp.IPv6ExtHdrFragment(offset=0, m=0, id=0x3001) / \
-		sp.UDP(dport=3456, sport=6543)
-	if args.debug :
-		ip6f01.display()
-	sp.sendp(ip6f01, iface=args.sendif[0], verbose=False)
-
-	sleep(0.10)
-	sniffer.setEnd()
-	sniffer.join()
-	if not sniffer.foundCorrectPacket:
-		sys.exit(1)
+	if args.debug:
+		pkt.display()
+	sp.sendp(pkt, iface=args.sendif[0], verbose=False)
 
 	sys.exit(0)
 
