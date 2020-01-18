@@ -6,4 +6,7 @@ rules:
   - base: Build-12.1-clean
     upstream: pfsense:releng/12.1
     mergeMethod: merge
+  - base: stable/12
+    upstream: pfsense:stable/12
+    mergeMethod: merge
 label: "WeiBot pull "
